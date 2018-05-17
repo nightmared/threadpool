@@ -1,0 +1,11 @@
+[package]
+name = "threadpool"
+version = "0.1.0"
+authors = ["Simon THOBY <simonthoby@live.fr>"]
+
+[lib]
+name = "libthreadpool"
+
+[dependencies]
+libc = "0.2"
+nix = "0.10.0"
