@@ -5,10 +5,9 @@ extern crate libc;
 use std::mem;
 use std::sync::Arc;
 use std::marker::PhantomData;
-use std::ffi::CStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::num::Wrapping;
-use nix::sys::{memfd, mman};
+use nix::sys::{mman, eventfd};
 use nix::unistd;
 use std::os::unix::io::RawFd;
 
@@ -18,7 +17,8 @@ use std::os::unix::io::RawFd;
 #[derive(Debug)]
 crate struct MessageQueueInternal {
     len: usize,
-    fd: RawFd,
+    // eventfd to notify about availability of data
+    crate fd: RawFd,
     backing_store: *mut libc::c_void,
     allocated_size: usize,
     read_pointer: AtomicUsize,
@@ -33,10 +33,6 @@ impl MessageQueueInternal {
     pub fn unread(&self) -> usize {
         (Wrapping(self.write_pointer.load(Ordering::SeqCst)) - Wrapping(self.read_pointer.load(Ordering::SeqCst))).0 % self.len
     }
-
-    pub fn get_fd(&self) -> RawFd {
-        self.fd
-    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -47,14 +43,20 @@ pub enum MessageQueueError {
     MmapFailed,
     MessageSendingFailed,
     MessageQueueFull,
-    MessageQueueEmpty
+    MessageQueueEmpty,
+    NixError(nix::Error)
+}
+
+impl From<nix::Error> for MessageQueueError {
+    fn from(e: nix::Error) -> Self {
+        MessageQueueError::NixError(e)
+    }
 }
 
 impl Drop for MessageQueueInternal {
     fn drop(&mut self) {
         unsafe {
-            mman::munmap(self.backing_store, self.allocated_size);
-            let _ = unistd::close(self.fd);
+            let _ = mman::munmap(self.backing_store, self.allocated_size);
         }
     }
 }
@@ -86,31 +88,19 @@ impl<T: Sized> MessageQueueSender<T> {
             size *= 2;
         }
         
-        let (fd, backing_store) = unsafe {
-            // TODO: investigate whether HugePages is worth it
-            let tmp = memfd::memfd_create(&CStr::from_bytes_with_nul(b"MessageQueue\0").unwrap(), memfd::MemFdCreateFlag::empty());
-            if tmp.is_err() {
-                return Err(MessageQueueError::FileDescriptorCreationFailed);
-            }
-            let fd = tmp.unwrap();
-
-            match nix::unistd::ftruncate(fd, size as libc::off_t) {
-                Ok(()) => {},
-                Err(_) => {
-                    let _ = unistd::close(fd);
-                    return Err(MessageQueueError::MemoryAllocationFailed);
-                }
-            };
+        let backing_store = unsafe {
             // Map into memory and let backing_store point to it
-            // TODO: if hugepages are used, take care of adding the MAP_HUGETLB flag !
-            let addr = match mman::mmap(0 as *mut libc::c_void, size, mman::ProtFlags::PROT_READ | mman::ProtFlags::PROT_WRITE, mman::MapFlags::MAP_SHARED, fd, 0) {
+            match mman::mmap(0 as *mut libc::c_void, size, mman::ProtFlags::PROT_READ | mman::ProtFlags::PROT_WRITE, mman::MapFlags::MAP_SHARED | mman::MapFlags::MAP_ANONYMOUS, -1, 0) {
                 Ok(x) => x,
                 Err(_) => {
-                    let _ = unistd::close(fd);
                     return Err(MessageQueueError::MmapFailed);
                 }
-            };
-            (fd, addr)
+            }
+        };
+
+        let fd = match eventfd::eventfd(0, eventfd::EfdFlags::empty()) {
+                Ok(x) => x,
+                Err(_) => return Err(MessageQueueError::FileDescriptorCreationFailed)
         };
 
         let internal = MessageQueueInternal {
@@ -143,6 +133,9 @@ impl<T: Sized> MessageQueueSender<T> {
         } else {
             self.internal.write_pointer.fetch_add(1, Ordering::SeqCst);
         }
+        // In case of overflow, everything will explode (until somenoe call read on the fd) !
+        // Hopefully, a reader whill call 'MessageQueueReader::read', which will in turn call read
+        unistd::write(self.internal.fd, &[1, 0, 0, 0, 0, 0, 0, 0])?;
         Ok(())
     }
 
@@ -156,7 +149,7 @@ impl<T: Sized> MessageQueueSender<T> {
     }
 
     pub fn get_fd(&self) -> RawFd {
-        self.internal.get_fd()
+        self.internal.fd
     }
 }
 
@@ -183,13 +176,17 @@ impl<T: Sized> MessageQueueReader<T> {
         } else {
             self.internal.read_pointer.fetch_add(1, Ordering::SeqCst);
         }
+        if !self.is_ready() {
+            let mut garbage = [0; 8];
+            unistd::read(self.internal.fd, &mut garbage)?;
+        }
         Ok(val)
     }
 
     // TODO: implement blocking read
 
     pub fn get_fd(&self) -> RawFd {
-        self.internal.get_fd()
+        self.internal.fd
     }
 }
 
@@ -197,8 +194,6 @@ impl<T: Sized> MessageQueueReader<T> {
 /// This is very akin to a ruststd channel.
 /// However, the whole reason of this implementation is to be able to listen on its file descriptor
 /// using epoll, which was apparently not possible on channels.
-/// EDIT: turns out epoll doesn't work on memfds anyway, so let's create a polling thing in
-/// userspace (and maybe get rid of memfd altogether by using mmap(ANONYMOUS))
 pub fn MessageQueue<T>(num_elements: usize) -> Result<(MessageQueueSender<T>, MessageQueueReader<T>), MessageQueueError> {
     let sender = match MessageQueueSender::new(num_elements) {
         Ok(x) => x,
