@@ -197,6 +197,8 @@ impl<T: Sized> MessageQueueReader<T> {
 /// This is very akin to a ruststd channel.
 /// However, the whole reason of this implementation is to be able to listen on its file descriptor
 /// using epoll, which was apparently not possible on channels.
+/// EDIT: turns out epoll doesn't work on memfds anyway, so let's create a polling thing in
+/// userspace (and maybe get rid of memfd altogether by using mmap(ANONYMOUS))
 pub fn MessageQueue<T>(num_elements: usize) -> Result<(MessageQueueSender<T>, MessageQueueReader<T>), MessageQueueError> {
     let sender = match MessageQueueSender::new(num_elements) {
         Ok(x) => x,

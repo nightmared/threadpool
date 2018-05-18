@@ -65,13 +65,21 @@ enum CmdAnswer<R> {
 
 #[derive(Debug, PartialEq)]
 enum TPError {
-    MessageQueueError(MessageQueueError)
+    MessageQueueError(MessageQueueError),
+    NixError(nix::Error),
+    EpollWaitFailed
 }
 
 
 impl From<MessageQueueError> for TPError {
     fn from(e: MessageQueueError) -> Self {
         TPError::MessageQueueError(e)
+    }
+}
+
+impl From<nix::Error> for TPError {
+    fn from(e: nix::Error) -> Self {
+        TPError::NixError(e)
     }
 }
 
@@ -112,14 +120,14 @@ impl<T: Send + 'static, R: Send + 'static> TP<T, R> {
         })
     }
 
-    fn tp_loop(self) {
-        // TODO: stop hoping this succeeds and handle errors properly here
-        let epfd = epoll::epoll_create1(epoll::EpollCreateFlags::EPOLL_CLOEXEC).unwrap();
+    fn tp_loop(self) -> Result<(), TPError> {
+        let epfd = epoll::epoll_create1(epoll::EpollCreateFlags::EPOLL_CLOEXEC)?;
         // TODO: handle peer disconnection (and threads panicking)
         let mut ev = epoll::EpollEvent::new(epoll::EpollFlags::EPOLLIN, 0);
-        epoll::epoll_ctl(epfd, epoll::EpollOp::EpollCtlAdd, self.cmd_rx.get_fd(), Some(&mut ev)).unwrap();
+        epoll::epoll_ctl(epfd, epoll::EpollOp::EpollCtlAdd, self.cmd_rx.get_fd(), Some(&mut ev));
+        println!("{}", nix::errno::errno());
         for i in 0..self.threads.len() {
-            epoll::epoll_ctl(epfd, epoll::EpollOp::EpollCtlAdd, self.threads[i].rx.get_fd(), Some(&mut ev)).unwrap();
+            epoll::epoll_ctl(epfd, epoll::EpollOp::EpollCtlAdd, self.threads[i].rx.get_fd(), Some(&mut ev))?;
         }
 
         // A listener per worker thread + the command queue
@@ -132,19 +140,19 @@ impl<T: Send + 'static, R: Send + 'static> TP<T, R> {
             let res = match epoll::epoll_wait(epfd, &mut events_vec, -1) {
                 Ok(x) => x,
                 Err(_) => {
-                    self.cmd_tx.send(CmdAnswer::Failed);
-                    return;
+                    self.cmd_tx.send(CmdAnswer::Failed)?;
+                    return Err(TPError::EpollWaitFailed);
                 }
             };
             if res == 0 {
                 continue;
             }
+            println!("{}", res);
         }
     }
 
-    fn run(self) {
-        // TODO: return a JoinHandle to ensure the threadpool didn't panic
-       thread::spawn(move || self.tp_loop());
+    fn run(self) -> thread::JoinHandle<Result<(), TPError>> {
+       thread::spawn(move || self.tp_loop())
     }
 }
 
@@ -157,7 +165,7 @@ fn main() -> Result<(), TPError> {
     let (cmd_tx, _cmd_rx) = MessageQueue(25)?;
     let (_cmd_tx, cmd_rx) = MessageQueue(25)?;
     let tp = TP::new(_cmd_rx, _cmd_tx, 2, handler)?;
-    tp.run();
+    println!("{:?}", tp.run().join());
     cmd_tx.send(CmdQuery::Stop)?;
     //tp.add_task(15);
     Ok(())
