@@ -1,6 +1,8 @@
+extern crate test;
 use lib::*;
 use std::thread;
 
+#[repr(packed)]
 struct TestStruct {
     a: usize,
     b: u32,
@@ -9,17 +11,17 @@ struct TestStruct {
 
 #[test]
 fn create_message_queue() {
-    let t = MessageQueueSender::<usize>::new(0);
-    assert_eq!(t.err(), Some(MessageQueueError::UnvalidSize));
-    let t = MessageQueueSender::<&u8>::new(2048);
-    assert!(t.is_ok());
+    assert_eq!(MessageQueueSender::<usize>::new(0).err(), Some(MessageQueueError::UnvalidSize));
+    assert_eq!(MessageQueueSender::<usize>::new(1).err(), Some(MessageQueueError::UnvalidSize));
+    // Attempt to create a queue to contain 10^12 messages
+    // This shouldn't work until someone with much more money than myself decided to use it (or the
+    // kernel fucked us in our back) ;)
+    assert_eq!(MessageQueueSender::<usize>::new(1000000000000).err(), Some(MessageQueueError::MmapFailed));
+    assert!(MessageQueueSender::<&u8>::new(2048).is_ok());
     for i in 0..5 {
-        let t = MessageQueueSender::<f64>::new(25*10^i);
-        assert!(t.is_ok());
-        let t = MessageQueueSender::<Vec<String>>::new(25*10^i);
-        assert!(t.is_ok());
-        let t = MessageQueueSender::<TestStruct>::new(25*10^i);
-        assert!(t.is_ok());
+        assert!(MessageQueueSender::<f64>::new(25*10^i).is_ok());
+        assert!(MessageQueueSender::<Vec<String>>::new(25*10^i).is_ok());
+        assert!(MessageQueueSender::<TestStruct>::new(25*10^i).is_ok());
     }
 }
 
@@ -27,13 +29,13 @@ fn create_message_queue() {
 fn create_reader() {
     let t = MessageQueueSender::<usize>::new(256).unwrap();
     let reader = t.new_reader();
-    assert_eq!(reader.available(), 0);
+    assert_eq!(reader.unread(), 0);
     assert_eq!(reader.is_ready(), false);
 }
 
 #[test]
 fn send_without_reader() {
-    let mut t = MessageQueueSender::<usize>::new(256).unwrap();
+    let t = MessageQueueSender::<usize>::new(256).unwrap();
     for i in 0..255 {
         let res = t.send(i);
         assert!(res.is_ok());
@@ -45,19 +47,19 @@ fn send_without_reader() {
 
 #[test]
 fn send_with_reader() {
-    let mut t = MessageQueueSender::<usize>::new(256).unwrap();
+    let t = MessageQueueSender::<usize>::new(256).unwrap();
     for i in 0..127 {
         let res = t.send(i);
         assert!(res.is_ok());
     }
     let mut reader = t.new_reader();
-    assert_eq!(reader.available(), 127);
+    assert_eq!(reader.unread(), 127);
     assert!(reader.is_ready());
     for c in 0..127  {
         assert_eq!(reader.is_ready(), true);
         assert_eq!(reader.read(), Ok(c));
     }
-    assert_eq!(reader.available(), 0);
+    assert_eq!(reader.unread(), 0);
     assert!(!reader.is_ready());
 
     for i in 0..255 {
@@ -87,7 +89,7 @@ fn send_across_thread() {
 
     let mut reader = t.new_reader();
     assert!(thread::spawn(move || {
-        assert_eq!(reader.available(), 127);
+        assert_eq!(reader.unread(), 127);
         assert!(reader.is_ready());
         for c in 0..127  {
             assert_eq!(reader.is_ready(), true);
@@ -95,9 +97,9 @@ fn send_across_thread() {
         }
     }).join().is_ok());
 
-    let mut reader = t.new_reader();
+    let reader = t.new_reader();
     assert!(thread::spawn(move || {
-        assert_eq!(reader.available(), 0);
+        assert_eq!(reader.unread(), 0);
         assert!(!reader.is_ready());
     }).join().is_ok());
 
@@ -126,7 +128,7 @@ fn send_across_thread() {
 
 #[test]
 fn send_concurrently() {
-    let mut t = MessageQueueSender::<usize>::new(8192).unwrap();
+    let t = MessageQueueSender::<usize>::new(8192).unwrap();
     for i in 0..4096 {
         let res = t.send(i);
         assert!(res.is_ok());
@@ -134,7 +136,7 @@ fn send_concurrently() {
 
     let mut reader = t.new_reader();
     assert!(thread::spawn(move || {
-        assert_eq!(reader.available(), 4096);
+        assert_eq!(reader.unread(), 4096);
         assert!(reader.is_ready());
         for c in 0..4096  {
             assert_eq!(reader.is_ready(), true);
@@ -150,8 +152,9 @@ fn send_concurrently() {
         }
         // Yeah, horrible spinlocks ;)
         while t.internal.unread() != 0 { }
-        t.send(8888);
+        t.send(8888).unwrap();
     });
+
    let receiver_thread = thread::spawn(move || {
         let mut c = 0;
         while c < 8192 {
@@ -166,4 +169,37 @@ fn send_concurrently() {
 
    assert!(sender_thread.join().is_ok());
    assert!(receiver_thread.join().is_ok());
+}
+
+#[bench]
+fn create_message_queue_struct_50(b: &mut test::Bencher) {
+    b.iter(|| MessageQueueSender::<TestStruct>::new(50).unwrap());
+}
+
+#[bench]
+fn create_message_queue_struct_2048(b: &mut test::Bencher) {
+    b.iter(|| MessageQueueSender::<TestStruct>::new(2048).unwrap());
+}
+
+#[bench]
+fn create_message_queue_struct_10m(b: &mut test::Bencher) {
+    b.iter(|| MessageQueueSender::<TestStruct>::new(10000000).unwrap());
+}
+
+#[bench]
+fn create_reader_2048(b: &mut test::Bencher) {
+    let s = MessageQueueSender::<usize>::new(2048).unwrap();
+    b.iter(|| s.new_reader());
+}
+
+#[bench]
+fn send_message_2048(b: &mut test::Bencher) {
+    let s = MessageQueueSender::<usize>::new(2048).unwrap();
+	let mut r = s.new_reader();
+	b.iter(|| {
+		for i in 0..1000 {
+			s.send(i).unwrap();
+		}
+		r.purge();
+	});
 }

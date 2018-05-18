@@ -16,7 +16,7 @@ use std::os::unix::io::RawFd;
 /// be dragons !)
 #[derive(Debug)]
 crate struct MessageQueueInternal {
-    len: usize,
+    crate len: usize,
     // eventfd to notify about availability of data
     crate fd: RawFd,
     backing_store: *mut libc::c_void,
@@ -56,6 +56,7 @@ impl From<nix::Error> for MessageQueueError {
 impl Drop for MessageQueueInternal {
     fn drop(&mut self) {
         unsafe {
+            let _ = unistd::close(self.fd);
             let _ = mman::munmap(self.backing_store, self.allocated_size);
         }
     }
@@ -120,22 +121,25 @@ impl<T: Sized> MessageQueueSender<T> {
     /// It is not possible currently to write len values into the queue but only 'len - 1' (to be
     /// able to segregate the inital case (unread() = 0) from the full case (unread() = 'len - 1')
     pub fn send(&self, val: T) -> Result<(), MessageQueueError> {
-        if self.internal.unread() == self.internal.len - 1 {
+        let wpos = self.internal.write_pointer.load(Ordering::SeqCst);
+        let rpos = self.internal.read_pointer.load(Ordering::SeqCst);
+        let unread = (Wrapping(wpos) - Wrapping(rpos)).0 % self.internal.len;
+
+        if unread == self.internal.len - 1 {
             return Err(MessageQueueError::MessageQueueFull)
         }
-        let pos = self.internal.write_pointer.load(Ordering::SeqCst);
-        let ptr = (self.internal.backing_store as usize + pos * mem::size_of::<T>()) as *mut T;
+
+        let ptr = (self.internal.backing_store as usize + wpos * mem::size_of::<T>()) as *mut T;
         unsafe {
             *ptr = val;
         }
-        if pos == self.internal.len - 1 {
-            self.internal.write_pointer.store(0, Ordering::SeqCst);
-        } else {
-            self.internal.write_pointer.fetch_add(1, Ordering::SeqCst);
+
+        self.internal.write_pointer.store((wpos+1)%self.internal.len, Ordering::SeqCst);
+        if unread == 0 {
+            // In case of overflow, everything will explode (until somenoe call read on the fd) !
+            // Hopefully, a reader whill call 'MessageQueueReader::read', which will in turn call read
+            unistd::write(self.internal.fd, &[1, 0, 0, 0, 0, 0, 0, 0])?;
         }
-        // In case of overflow, everything will explode (until somenoe call read on the fd) !
-        // Hopefully, a reader whill call 'MessageQueueReader::read', which will in turn call read
-        unistd::write(self.internal.fd, &[1, 0, 0, 0, 0, 0, 0, 0])?;
         Ok(())
     }
 
@@ -154,7 +158,8 @@ impl<T: Sized> MessageQueueSender<T> {
 }
 
 impl<T: Sized> MessageQueueReader<T> {
-    pub fn available(&self) -> usize {
+    /// Return number of entries available to read
+    pub fn unread(&self) -> usize {
         self.internal.unread()
     }
 
@@ -182,6 +187,13 @@ impl<T: Sized> MessageQueueReader<T> {
         }
         Ok(val)
     }
+
+    pub fn purge(&mut self) {
+        self.internal.read_pointer.store(
+            self.internal.write_pointer.load(Ordering::SeqCst),
+            Ordering::SeqCst);
+    }
+
 
     // TODO: implement blocking read
 

@@ -1,4 +1,4 @@
-#![feature(crate_visibility_modifier)]
+#![feature(crate_visibility_modifier, test)]
 extern crate nix;
 extern crate libc;
 
@@ -8,8 +8,7 @@ use lib::*;
 use nix::sys::epoll;
 
 mod lib;
-#[cfg(test)]
-mod tests;
+#[cfg(test)] mod tests;
 
 #[derive(Debug)]
 enum ThreadQuery<T> {
