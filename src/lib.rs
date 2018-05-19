@@ -99,7 +99,7 @@ impl<T: Sized> MessageQueueSender<T> {
             }
         };
 
-        let fd = match eventfd::eventfd(0, eventfd::EfdFlags::empty()) {
+        let fd = match eventfd::eventfd(0, eventfd::EfdFlags::EFD_SEMAPHORE) {
                 Ok(x) => x,
                 Err(_) => return Err(MessageQueueError::FileDescriptorCreationFailed)
         };
@@ -121,25 +121,20 @@ impl<T: Sized> MessageQueueSender<T> {
     /// It is not possible currently to write len values into the queue but only 'len - 1' (to be
     /// able to segregate the inital case (unread() = 0) from the full case (unread() = 'len - 1')
     pub fn send(&self, val: T) -> Result<(), MessageQueueError> {
-        let wpos = self.internal.write_pointer.load(Ordering::SeqCst);
-        let rpos = self.internal.read_pointer.load(Ordering::SeqCst);
-        let unread = (Wrapping(wpos) - Wrapping(rpos)).0 % self.internal.len;
-
-        if unread == self.internal.len - 1 {
-            return Err(MessageQueueError::MessageQueueFull)
+        if self.internal.unread() == self.internal.len - 1 {
+            return Err(MessageQueueError::MessageQueueFull);
         }
 
+        let wpos = self.internal.write_pointer.load(Ordering::SeqCst);
         let ptr = (self.internal.backing_store as usize + wpos * mem::size_of::<T>()) as *mut T;
         unsafe {
             *ptr = val;
         }
-
         self.internal.write_pointer.store((wpos+1)%self.internal.len, Ordering::SeqCst);
-        if unread == 0 {
-            // In case of overflow, everything will explode (until somenoe call read on the fd) !
-            // Hopefully, a reader whill call 'MessageQueueReader::read', which will in turn call read
-            unistd::write(self.internal.fd, &[1, 0, 0, 0, 0, 0, 0, 0])?;
-        }
+
+        // In case of overflow, everything will explode (until someone call read on the fd) !
+        // Hopefully, a reader will call 'MessageQueueReader::read', which will in turn call read
+        unistd::write(self.internal.fd, &[1, 0, 0, 0, 0, 0, 0, 0])?;
         Ok(())
     }
 
@@ -170,21 +165,17 @@ impl<T: Sized> MessageQueueReader<T> {
     // The 'mut' reference to 'self' is there to prevent multiple readers from accessing concurrently
     // the message queue
     pub fn read(&mut self) -> Result<T, MessageQueueError> {
-        if !self.is_ready() {
+        if self.internal.unread() == 0 {
             return Err(MessageQueueError::MessageQueueEmpty);
         }
-        let pos = self.internal.read_pointer.load(Ordering::SeqCst);
-        let ptr = (self.internal.backing_store as usize + pos * mem::size_of::<T>()) as *mut T;
+
+        let rpos = self.internal.read_pointer.load(Ordering::SeqCst);
+        let ptr = (self.internal.backing_store as usize + rpos * mem::size_of::<T>()) as *mut T;
         let val: T = unsafe { mem::transmute_copy(&*ptr) };
-        if pos == self.internal.len - 1 {
-            self.internal.read_pointer.store(0, Ordering::SeqCst);
-        } else {
-            self.internal.read_pointer.fetch_add(1, Ordering::SeqCst);
-        }
-        if !self.is_ready() {
-            let mut garbage = [0; 8];
-            unistd::read(self.internal.fd, &mut garbage)?;
-        }
+        self.internal.read_pointer.store((rpos+1)%self.internal.len, Ordering::SeqCst);
+
+        let mut garbage = [0; 8];
+        unistd::read(self.internal.fd, &mut garbage)?;
         Ok(val)
     }
 
@@ -192,6 +183,8 @@ impl<T: Sized> MessageQueueReader<T> {
         self.internal.read_pointer.store(
             self.internal.write_pointer.load(Ordering::SeqCst),
             Ordering::SeqCst);
+        let mut garbage = [0; 8];
+        unistd::read(self.internal.fd, &mut garbage).unwrap();
     }
 
 
