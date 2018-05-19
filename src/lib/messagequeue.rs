@@ -1,7 +1,5 @@
-#![feature(crate_visibility_modifier)]
 extern crate nix;
 extern crate libc;
-
 use std::mem;
 use std::sync::Arc;
 use std::marker::PhantomData;
@@ -15,10 +13,10 @@ use std::os::unix::io::RawFd;
 /// from being deleted while having a Reader still exists, thus leading to memory unsafety (hereby
 /// be dragons !)
 #[derive(Debug)]
-crate struct MessageQueueInternal {
-    crate len: usize,
+pub(crate) struct MessageQueueInternal {
+    pub len: usize,
     // eventfd to notify about availability of data
-    crate fd: RawFd,
+    pub fd: RawFd,
     backing_store: *mut libc::c_void,
     allocated_size: usize,
     read_pointer: AtomicUsize,
@@ -64,13 +62,13 @@ impl Drop for MessageQueueInternal {
 
 #[derive(Debug)]
 pub struct MessageQueueSender<T> {
-    crate internal: Arc<MessageQueueInternal>,
+    pub(crate) internal: Arc<MessageQueueInternal>,
     _t: PhantomData<T>
 }
 
 #[derive(Debug)]
 pub struct MessageQueueReader<T> {
-    crate internal: Arc<MessageQueueInternal>,
+    pub(crate) internal: Arc<MessageQueueInternal>,
     _t: PhantomData<T>
 }
 
