@@ -1,12 +1,14 @@
 extern crate test;
 use lib::*;
 use std::thread;
+use std::time::{Duration, SystemTime};
 
 #[repr(packed)]
+#[derive(Debug, PartialEq)]
 struct TestStruct {
     a: usize,
-    b: u32,
-    c: [u8; 6]
+    b: String,
+    c: [usize; 2]
 }
 
 #[test]
@@ -73,10 +75,30 @@ fn send_with_reader() {
 
     let mut c = 0;
     while reader.is_ready() {
-        assert_eq!(reader.read(), Ok(c));
+        assert_eq!(reader.blocking_read(), Ok(c));
         c += 1;
     }
     assert_eq!(c, 255);
+}
+
+#[test]
+fn send_struct() {
+    let t = MessageQueueSender::<TestStruct>::new(256).unwrap();
+    for i in 0..127 {
+        t.send(TestStruct {
+            a: i,
+            b: "42".into(),
+            c: [i, i+1]
+        });
+    }
+    let mut r = t.new_reader();
+    for i in 0..127 {
+        assert_eq!(r.read(), Ok(TestStruct {
+            a: i,
+            b: "42".into(),
+            c: [i, i+1]
+        }));
+    }
 }
 
 #[test]
@@ -171,6 +193,33 @@ fn send_concurrently() {
    assert!(receiver_thread.join().is_ok());
 }
 
+#[test]
+fn send_concurrently_blocking_read() {
+    let t = MessageQueueSender::<usize>::new(8192).unwrap();
+    for i in 0..4096 {
+        let res = t.send(i);
+        assert!(res.is_ok());
+    }
+
+    let mut reader = t.new_reader();
+    assert!(thread::spawn(move || {
+        for c in 0..4096  {
+            assert_eq!(reader.blocking_read(), Ok(c));
+        }
+    }).join().is_ok());
+
+    let mut reader = t.new_reader();
+    let blocking_thread = thread::spawn(move || {
+        let now = SystemTime::now();
+        assert_eq!(reader.blocking_read(), Ok(42));
+        assert!(now.elapsed().unwrap() > Duration::from_millis(50));
+    });
+
+    thread::sleep(Duration::from_millis(50));
+    t.send(42).unwrap();
+    assert!(blocking_thread.join().is_ok());
+}
+
 #[bench]
 fn create_message_queue_struct_50(b: &mut test::Bencher) {
     b.iter(|| MessageQueueSender::<TestStruct>::new(50).unwrap());
@@ -197,9 +246,9 @@ fn send_message_2048(b: &mut test::Bencher) {
     let s = MessageQueueSender::<usize>::new(2048).unwrap();
 	let mut r = s.new_reader();
 	b.iter(|| {
-		for i in 0..1000 {
-			s.send(i).unwrap();
-		}
-		r.purge();
+        for i in 0..1000 {
+            s.send(i).unwrap();
+            r.read().unwrap();
+        }
 	});
 }

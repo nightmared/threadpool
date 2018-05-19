@@ -118,8 +118,11 @@ impl<T: Sized> MessageQueueSender<T> {
             _t: PhantomData
         })
     }
-    /// It is not possible currently to write len values into the queue but only 'len - 1' (to be
-    /// able to segregate the inital case (unread() = 0) from the full case (unread() = 'len - 1')
+
+    /// Send a message to the queue
+    /// N.B.: the queue cannot hold 'len' values but only 'len - 1', as a side effect of the way
+    /// we segregate the case where the queue is empty (unread() = 0) of the one where it is full
+    /// (unread() = 'len - 1').
     pub fn send(&self, val: T) -> Result<(), MessageQueueError> {
         if self.internal.unread() == self.internal.len - 1 {
             return Err(MessageQueueError::MessageQueueFull);
@@ -162,6 +165,15 @@ impl<T: Sized> MessageQueueReader<T> {
         self.internal.unread() > 0
     }
 
+    /// Get current value pointed to by the read_pointer and update the read_pointer.
+    fn get_current_val(&mut self) -> T {
+        let rpos = self.internal.read_pointer.load(Ordering::SeqCst);
+        let ptr = (self.internal.backing_store as usize + rpos * mem::size_of::<T>()) as *mut T;
+        let val: T = unsafe { mem::transmute_copy(&*ptr) };
+        self.internal.read_pointer.store((rpos+1)%self.internal.len, Ordering::SeqCst);
+        val
+    }
+
     // The 'mut' reference to 'self' is there to prevent multiple readers from accessing concurrently
     // the message queue
     pub fn read(&mut self) -> Result<T, MessageQueueError> {
@@ -169,33 +181,24 @@ impl<T: Sized> MessageQueueReader<T> {
             return Err(MessageQueueError::MessageQueueEmpty);
         }
 
-        let rpos = self.internal.read_pointer.load(Ordering::SeqCst);
-        let ptr = (self.internal.backing_store as usize + rpos * mem::size_of::<T>()) as *mut T;
-        let val: T = unsafe { mem::transmute_copy(&*ptr) };
-        self.internal.read_pointer.store((rpos+1)%self.internal.len, Ordering::SeqCst);
+        // this cannot block as the queue isn't empty
+        self.blocking_read()
+    }
 
+    pub fn blocking_read(&mut self) -> Result<T, MessageQueueError> {
         let mut garbage = [0; 8];
+        // if no data is in the queue, this will block until data is available
         unistd::read(self.internal.fd, &mut garbage)?;
-        Ok(val)
+
+        Ok(self.get_current_val())
     }
-
-    pub fn purge(&mut self) {
-        self.internal.read_pointer.store(
-            self.internal.write_pointer.load(Ordering::SeqCst),
-            Ordering::SeqCst);
-        let mut garbage = [0; 8];
-        unistd::read(self.internal.fd, &mut garbage).unwrap();
-    }
-
-
-    // TODO: implement blocking read
 
     pub fn get_fd(&self) -> RawFd {
         self.internal.fd
     }
 }
 
-/// Create a Message queue with a write and a reader.
+/// Create a Message queue with a sender and a reader.
 /// This is very akin to a ruststd channel.
 /// However, the whole reason of this implementation is to be able to listen on its file descriptor
 /// using epoll, which was apparently not possible on channels.
