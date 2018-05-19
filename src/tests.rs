@@ -212,7 +212,8 @@ fn send_concurrently_blocking_read() {
     let blocking_thread = thread::spawn(move || {
         let now = SystemTime::now();
         assert_eq!(reader.blocking_read(), Ok(42));
-        assert!(now.elapsed().unwrap() > Duration::from_millis(50));
+        // add 5 ms of margin to account for relativity
+        assert!(now.elapsed().unwrap() > Duration::from_millis(45));
     });
 
     thread::sleep(Duration::from_millis(50));
