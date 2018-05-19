@@ -6,6 +6,7 @@ mod lib;
 #[cfg(test)] mod tests;
 
 use std::{io, mem, thread};
+use std::collections::VecDeque;
 use lib::*;
 use nix::sys::epoll;
 
@@ -22,13 +23,12 @@ enum ThreadAnswer<R> {
     TaskResult(R),
     Error(io::Error)
 }
-
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum TPThreadState {
-    Starting,
-    Running,
     Ready,
-    Stopping
+    Running,
+    Stopping,
+    Stopped
 }
 
 #[derive(Debug)]
@@ -39,24 +39,36 @@ struct TPThread<T, R> {
     rx: MessageQueueReader<ThreadAnswer<R>>
 }
 
+impl<T, R> TPThread<T, R> {
+    fn stop(&mut self) -> Result<(), TPError> {
+        self.tx.send(ThreadQuery::Stop)?;
+        self.state = TPThreadState::Stopping;
+        Ok(())
+    }
+
+    fn run(&mut self, task: T) -> Result<(), TPError> {
+        self.tx.send(ThreadQuery::RunTask(task))?;
+        self.state = TPThreadState::Running;
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 enum CmdQuery<T> {
     Stop,
     StopThread(usize),
-    GetNumberThreads,
-    GetNumberRunningThreads,
-    AddThread(Option<usize>),
-    AddTask(T),
+    GetInfo,
+    AddTask(T)
 }
 
 #[derive(Debug)]
 enum CmdAnswer<R> {
     StoppedThread(usize),
     Stopped,
-    TaskSucces(R),
+    TaskSuccess(R),
     TaskFailure(io::Error),
-    NumberThreads(usize),
-    NumberRunningThread(usize),
+    TaskRejected,
+    State(TPState),
     ThreadAdded,
     Failed
 }
@@ -82,11 +94,22 @@ impl From<nix::Error> for TPError {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+enum TPState {
+    // TODO: improve over this very "weak" API
+    // Running(total, ready, stopped)
+    Running(usize, usize, usize),
+    Stopping
+}
+
 #[derive(Debug)]
 struct TP<T, R> {
    cmd_rx: MessageQueueReader<CmdQuery<T>>,
    cmd_tx: MessageQueueSender<CmdAnswer<R>>,
-   threads: Vec<TPThread<T, R>>
+   threads: Vec<TPThread<T, R>>,
+   // work waiting to be done (no ready threads)
+   work_queue: VecDeque<T>,
+   state: TPState
 }
 
 fn runner_task<T, R, F>(rx: MessageQueueReader<ThreadQuery<T>>, tx: MessageQueueSender<ThreadAnswer<R>>, worker_fun: F)
@@ -106,7 +129,7 @@ impl<T: Send + 'static, R: Send + 'static> TP<T, R> {
             let handle = thread::spawn(|| runner_task(rx1, tx2, f));
             let t = TPThread {
                 internal: handle,
-                state: TPThreadState::Starting,
+                state: TPThreadState::Ready,
                 tx: tx1,
                 rx: rx2
             };
@@ -115,7 +138,9 @@ impl<T: Send + 'static, R: Send + 'static> TP<T, R> {
         Ok(TP {
             cmd_rx: rx,
             cmd_tx: tx,
-            threads
+            threads,
+            work_queue: VecDeque::new(),
+            state: TPState::Running(number_workers, number_workers, 0)
         })
     }
 
@@ -128,20 +153,55 @@ impl<T: Send + 'static, R: Send + 'static> TP<T, R> {
                     return Err(TPError::ReadFailed);
                 }
             };
+            match msg {
+                CmdQuery::GetInfo => self.cmd_tx.send(CmdAnswer::State(self.state.clone()))?,
+                CmdQuery::StopThread(n) => self.threads[n].stop()?,
+                CmdQuery::Stop => {
+                    for i in 0..self.threads.len() {
+                        self.threads[i].stop()?;
+                    }
+                    self.state = TPState::Stopping;
+                },
+                CmdQuery::AddTask(task) => {
+                    if let TPState::Running(_, ready, _) = self.state {
+                        // check if there is some thread ready
+                        if ready == 0 {
+                            self.work_queue.push_front(task);
+                        } else {
+                            // scan for a ready thread
+                            let mut thread = {
+                                let mut i = 0;
+                                while i < self.threads.len() {
+                                    if self.threads[i].state == TPThreadState::Ready {
+                                        break;
+                                    }
+                                    i+=1;
+                                }
+                                &mut self.threads[i]
+                            };
+                            thread.run(task);
+                        }
+                    } else {
+                        self.cmd_tx.send(CmdAnswer::TaskRejected)?;
+                    }
+                }
+            }
         }
 
         Ok(())
     }
 
-    fn receive_from_thread(&mut self, queue: &mut MessageQueueReader<ThreadAnswer<R>>) -> Result<(), TPError> {
-        while queue.is_ready() {
-            let msg = match queue.read() {
+    fn receive_from_thread(&mut self, th: &mut TPThread<T, R>) -> Result<(), TPError> {
+        while th.rx.is_ready() {
+            let msg = match th.rx.read() {
                 Ok(x) => x,
                 Err(_) => {
                     self.cmd_tx.send(CmdAnswer::Failed)?;
                     return Err(TPError::ReadFailed);
                 }
             };
+            // take care of clearing the work queue when ready (and updating state)
+            // TODO: everything
         }
 
         Ok(())
@@ -155,13 +215,11 @@ impl<T: Send + 'static, R: Send + 'static> TP<T, R> {
         for i in 0..self.threads.len() {
             // Behold ! Dark magic is happening here ! (Yes, it's only dark because it's not arcane enought
             // to be called black magic). We store a pointer to the queue in the data, which allow us to call
-            // queue.read() directly on the data returned by epoll. (I wonder what will hapen with
-            // 128 bit architectures when thoses will exist).
-            // Besides, the whole point of this is that adding/deleting threads shouldn't impact
-            // epoll in any way, thus referencing threads by their index in self.threads is not
-            // workable.
-            let mut ev = epoll::EpollEvent::new(epoll::EpollFlags::EPOLLIN, &mut self.threads[i].rx
-                                                as *mut MessageQueueReader<ThreadAnswer<R>> as u64);
+            // thread.rx.read() directly on the data returned by epoll. (I wonder what will hapen with 128
+            // bit architectures when thoses will exist).
+            // Besides, the whole point of this is that adding/deleting threads shouldn't impact epoll in
+            // any way, thus referencing threads by their index in self.threads is not workable.
+            let mut ev = epoll::EpollEvent::new(epoll::EpollFlags::EPOLLIN, &mut self.threads[i] as *mut TPThread<T, R> as u64);
             epoll::epoll_ctl(epfd, epoll::EpollOp::EpollCtlAdd, self.threads[i].rx.get_fd(), Some(&mut ev))?;
         }
 
@@ -179,7 +237,7 @@ impl<T: Send + 'static, R: Send + 'static> TP<T, R> {
                     return Err(TPError::EpollWaitFailed);
                 }
             };
-            // Nothing interesting here, go on
+            // Nothing interesting here, go on (probably some spurious interrupt)
             if res == 0 { continue; }
 
             for i in 0..res {
@@ -189,7 +247,7 @@ impl<T: Send + 'static, R: Send + 'static> TP<T, R> {
                     self.received_cmd()?;
                 } else {
                     // Because who doesn't like transmut'ing stuff ?
-                    let mut reader: &mut MessageQueueReader<ThreadAnswer<R>> = unsafe { mem::transmute(reader_ptr) };
+                    let mut reader: &mut TPThread<T, R> = unsafe { mem::transmute(reader_ptr) };
                     self.receive_from_thread(&mut reader)?;
                 }
             }
