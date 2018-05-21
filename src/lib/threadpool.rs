@@ -1,5 +1,5 @@
 extern crate nix;
-use std::{io, mem, thread, option};
+use std::{mem, thread, option};
 use std::collections::VecDeque;
 use nix::sys::epoll;
 use nix::unistd;
@@ -334,5 +334,40 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
 
     pub fn run(self) -> thread::JoinHandle<Result<(), TPError>> {
        thread::spawn(move || self.tp_loop())
+    }
+}
+
+
+pub struct TPHandler<T, R> {
+    handle: thread::JoinHandle<Result<(), TPError>>,
+    rx: MessageQueueReader<CmdAnswer<R>>,
+    tx: MessageQueueSender<CmdQuery<T>>
+}
+
+impl<T: Send + 'static, R: Send + 'static> TPHandler<T, R> {
+    pub fn new<F: Fn(T) -> Result<R, TPError> + 'static + Clone + Send>(number_workers: usize, f: F) -> Result<TPHandler<T, R>, TPError> {
+        let (cmd_tx, mut _cmd_rx) = MessageQueue(2048)?;
+        let (_cmd_tx, mut cmd_rx) = MessageQueue(2048)?;
+        let tp = TP::new(_cmd_rx, _cmd_tx, number_workers, f)?;
+        let handle = tp.run();
+        Ok(TPHandler {
+            handle,
+            rx: cmd_rx,
+            tx: cmd_tx
+        })
+    }
+
+    pub fn send(&self, task: T) -> Result<(), TPError> {
+        self.tx.send(CmdQuery::AddTask(task))?;
+        Ok(())
+    }
+
+    pub fn stop(&self, thread: Option<usize>) -> Result<(), TPError> {
+        if let Some(t) = thread {
+            self.tx.send(CmdQuery::StopThread(t))?;
+        } else {
+            self.tx.send(CmdQuery::Stop)?;
+        }
+        Ok(())
     }
 }
