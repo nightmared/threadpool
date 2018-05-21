@@ -15,7 +15,7 @@ enum ThreadQuery<T> {
 enum ThreadAnswer<R> {
     Stopped,
     TaskResult(R),
-    Error(io::Error),
+    Error(TPError),
     Failure
 }
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -61,7 +61,7 @@ pub enum CmdAnswer<R> {
     StoppedThread(usize),
     Stopped,
     TaskSuccess(R),
-    TaskFailure(io::Error),
+    TaskFailure(TPError),
     TaskRejected,
     State(TPState),
     ThreadAdded,
@@ -114,15 +114,27 @@ pub struct TP<T, R, F> {
    state: TPState
 }
 
-fn runner_task<T, R, F>(rx: MessageQueueReader<ThreadQuery<T>>, tx: MessageQueueSender<ThreadAnswer<R>>, worker_fun: F)
+fn runner_task<T, R, F>(mut rx: MessageQueueReader<ThreadQuery<T>>, tx: MessageQueueSender<ThreadAnswer<R>>, worker_fun: F)
     where F: Fn(T) -> Result<R, TPError> {
-    tx.send(ThreadAnswer::Stopped).unwrap();
+        while let Ok(msg) = rx.blocking_read() {
+            match msg {
+                ThreadQuery::RunTask(task) => {//TODO
+                    match worker_fun(task) {
+                        Ok(res) => tx.send(ThreadAnswer::TaskResult(res)).unwrap(),
+                        Err(e) => tx.send(ThreadAnswer::Error(e)).unwrap()
+                    }
+                },
+                ThreadQuery::Stop => break
+            }
+        }
+        tx.send(ThreadAnswer::Stopped).unwrap();
 }
 
 fn create_runner<T, R, F>(f: F) -> Result<TPThread<T, R>, TPError>
     where T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'static + Clone + Send {
-    let (tx1, rx1) = MessageQueue(1024)?;
-    let (tx2, rx2) = MessageQueue(1024)?;
+    // TODO: allow to change queues length
+    let (tx1, rx1) = MessageQueue(2048)?;
+    let (tx2, rx2) = MessageQueue(2048)?;
     let f = f.clone();
     let handle = thread::spawn(|| runner_task(rx1, tx2, f));
     Ok(TPThread {
@@ -313,6 +325,7 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
                     self.receive_from_thread(&mut reader)?;
                 }
             }
+            self.run_work_from_queue()?;
         }
         self.cmd_tx.send(CmdAnswer::Stopped)?;
         unistd::close(epfd)?;

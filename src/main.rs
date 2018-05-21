@@ -13,9 +13,12 @@ fn handler(x: usize) -> Result<usize, TPError> {
 }
 
 fn main() -> Result<(), TPError> {
-    let (cmd_tx, mut _cmd_rx) = MessageQueue(25)?;
-    let (_cmd_tx, mut cmd_rx) = MessageQueue(25)?;
+    let (cmd_tx, mut _cmd_rx) = MessageQueue(2048)?;
+    let (_cmd_tx, mut cmd_rx) = MessageQueue(2048)?;
     let tp = TP::new(_cmd_rx, _cmd_tx, 2, handler)?;
+    for i in 0..25 {
+        cmd_tx.send(CmdQuery::AddTask(i))?;
+    }
     cmd_tx.send(CmdQuery::Stop)?;
     let joinhandle = tp.run();
     loop {
