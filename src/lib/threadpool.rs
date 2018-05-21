@@ -1,7 +1,8 @@
 extern crate nix;
-use std::{io, mem, thread};
+use std::{io, mem, thread, option};
 use std::collections::VecDeque;
 use nix::sys::epoll;
+use nix::unistd;
 use lib::messagequeue::*;
 
 #[derive(Debug)]
@@ -72,9 +73,9 @@ pub enum TPError {
     MessageQueueError(MessageQueueError),
     NixError(nix::Error),
     ReadFailed,
-    EpollWaitFailed
+    EpollWaitFailed,
+    UnwrapingNone
 }
-
 
 impl From<MessageQueueError> for TPError {
     fn from(e: MessageQueueError) -> Self {
@@ -88,12 +89,18 @@ impl From<nix::Error> for TPError {
     }
 }
 
+impl From<option::NoneError> for TPError {
+    fn from(e: option::NoneError) -> Self {
+        TPError::UnwrapingNone
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum TPState {
-    // TODO: improve over this very "weak" API
-    // Running(total, ready, stopped)
-    Running(usize, usize, usize),
-    Stopping
+    Running,
+    // Stopping(number of still alive threads)
+    Stopping,
+    Stopped
 }
 
 #[derive(Debug)]
@@ -139,53 +146,44 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
             threads,
             work_queue: VecDeque::new(),
             handler_fun: f,
-            state: TPState::Running(number_workers, number_workers, 0)
+            state: TPState::Running
         })
     }
 
-    // add one to the number of threads available
-    fn ready_inc(&mut self) {
-        if let TPState::Running(tot, ready, stopped) = self.state {
-            self.state = TPState::Running(tot, ready + 1, stopped);
-        }
-    }
-
-    // add one to the number of threads stopped
-    fn stopped_inc(&mut self) {
-        if let TPState::Running(tot, ready, stopped) = self.state {
-            self.state = TPState::Running(tot, ready, stopped + 1);
-        }
-    }
-
-    // Is there at least a thread in the 'Ready' state
-    fn is_ready(&self) -> bool {
-        if let TPState::Running(tot, ready, stopped) = self.state {
-            ready != 0
-        } else {
-            false
-        }
-    }
-
-
-    // To call this function, you have to ensure at least a thread is ready. No checks will be
-    // performed !
-    fn get_ready_thread(&mut self) -> &mut TPThread<T, R> {
-        let mut i = 0;
-        while i < self.threads.len() {
+    fn get_ready_thread(&mut self) -> Option<&mut TPThread<T, R>> {
+        for i in 0..self.threads.len() {
             if self.threads[i].state == TPThreadState::Ready {
-                break;
+                return Some(&mut self.threads[i]);
             }
-            i+=1;
         }
-        &mut self.threads[i]
+        None
+    }
+
+    fn is_ready_thread(&self) -> bool {
+        for i in 0..self.threads.len() {
+            if self.threads[i].state == TPThreadState::Ready {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_stopped(&self) -> bool {
+         for i in 0..self.threads.len() {
+            if self.threads[i].state != TPThreadState::Stopped {
+                return false;
+            }
+        }
+        true
+
     }
 
     // At least a thread must be ready to call this function.
     fn run_work_from_queue(&mut self) -> Result<(), TPError> {
-        while !self.work_queue.is_empty() && self.is_ready() {
-            let task = self.work_queue.pop_back().unwrap();
-            let th = self.get_ready_thread();
-            th.run(task)?;
+        // The excessive check is saddening but is forced upon us by the borrow checker
+        while self.is_ready_thread() && !self.work_queue.is_empty() {
+            let val = self.work_queue.pop_back()?;
+            self.get_ready_thread()?.run(val)?;
         }
         Ok(())
     }
@@ -209,13 +207,12 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
                     self.state = TPState::Stopping;
                 },
                 CmdQuery::AddTask(task) => {
-                    if let TPState::Running(_, ready, _) = self.state {
+                    if self.state == TPState::Running {
                         // check if there is some thread ready
-                        if ready == 0 {
-                            self.work_queue.push_front(task);
+                        if self.is_ready_thread() {
+                            self.get_ready_thread()?.run(task)?;
                         } else {
-                            let mut thread = self.get_ready_thread();
-                            thread.run(task)?;
+                            self.work_queue.push_front(task);
                         }
                     } else {
                         self.cmd_tx.send(CmdAnswer::TaskRejected)?;
@@ -239,19 +236,15 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
             // take care of clearing the work queue when ready (and updating state)
             match msg {
                 ThreadAnswer::Error(e) => {
-                    self.cmd_tx.send(CmdAnswer::TaskFailure(e));
-                    th.state = TPThreadState::Ready;
-                    self.ready_inc();
+                    self.cmd_tx.send(CmdAnswer::TaskFailure(e))?;
+                    if th.state != TPThreadState::Stopping {
+                        th.state = TPThreadState::Ready;
+                    }
                 },
                 ThreadAnswer::Failure => {
-                    let old_state = th.state;
-                    if old_state == TPThreadState::Running || old_state == TPThreadState::Ready {
+                    if th.state == TPThreadState::Running || th.state == TPThreadState::Ready {
                         // replace the worker with a new one
                         mem::replace(th, create_runner(self.handler_fun.clone())?);
-                        // update counters
-                        if old_state == TPThreadState::Running {
-                            self.ready_inc();
-                        }
                     } else {
                         // thread was stopping or stopped, do not touch anything
                         th.state = TPThreadState::Stopped;
@@ -259,12 +252,16 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
                 },
                 ThreadAnswer::Stopped => {
                     th.state = TPThreadState::Stopped;
-                    self.stopped_inc();
+                    // if all threads are stopped, exit
+                    if self.is_stopped() {
+                        self.state = TPState::Stopped;
+                    }
                 },
                 ThreadAnswer::TaskResult(res) => {
-                    th.state = TPThreadState::Ready;
-                    self.ready_inc();
                     self.cmd_tx.send(CmdAnswer::TaskSuccess(res))?;
+                    if th.state != TPThreadState::Stopping {
+                        th.state = TPThreadState::Ready;
+                    }
                 }
             }
         }
@@ -294,7 +291,7 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
         for _ in 0..max_events {
             events_vec.push(epoll::EpollEvent::empty());
         }
-        loop {
+        while self.state != TPState::Stopped {
             let res = match epoll::epoll_wait(epfd, &mut events_vec, -1) {
                 Ok(x) => x,
                 Err(_) => {
@@ -317,9 +314,12 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
                 }
             }
         }
+        self.cmd_tx.send(CmdAnswer::Stopped)?;
+        unistd::close(epfd)?;
+        Ok(())
     }
 
-    pub fn run(mut self) -> thread::JoinHandle<Result<(), TPError>> {
+    pub fn run(self) -> thread::JoinHandle<Result<(), TPError>> {
        thread::spawn(move || self.tp_loop())
     }
 }

@@ -1,4 +1,4 @@
-#![feature(test)]
+#![feature(test, try_trait)]
 extern crate nix;
 extern crate libc;
 
