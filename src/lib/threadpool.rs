@@ -5,31 +5,39 @@ use nix::sys::epoll;
 use nix::unistd;
 use lib::messagequeue::*;
 
-#[derive(Debug)]
-enum ThreadQuery<T> {
+#[derive(PartialEq, Debug)]
+enum ThreadQueryState {
     Stop,
-    RunTask(T)
+    RunTask
 }
 
 #[derive(Debug)]
-enum ThreadAnswer<R> {
-    Stopped,
-    TaskResult(R),
-    Error(TPError),
-    Failure
+struct ThreadQuery<T> {
+    state: ThreadQueryState,
+    task: Option<T>,
+    id: usize
 }
+
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum TPThreadState {
+enum ThreadState {
     Ready,
     Running,
     Stopping,
-    Stopped
+    Stopped,
+    Failure
+}
+
+#[derive(Debug)]
+struct ThreadAnswer<R> {
+    state: ThreadState,
+    val: Option<Result<R, TPError>>,
+    id: usize
 }
 
 #[derive(Debug)]
 struct TPThread<T, R> {
     internal: thread::JoinHandle<()>,
-    state: TPThreadState,
+    state: ThreadState,
     tx: MessageQueueSender<ThreadQuery<T>>,
     rx: MessageQueueReader<ThreadAnswer<R>>
 }
@@ -48,7 +56,7 @@ impl<T, R> TPThread<T, R> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum CmdQuery<T> {
     Stop,
     StopThread(usize),
@@ -56,7 +64,7 @@ pub enum CmdQuery<T> {
     AddTask(T)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum CmdAnswer<R> {
     StoppedThread(usize),
     Stopped,
@@ -108,17 +116,16 @@ pub struct TP<T, R, F> {
    cmd_rx: MessageQueueReader<CmdQuery<T>>,
    cmd_tx: MessageQueueSender<CmdAnswer<R>>,
    threads: Vec<TPThread<T, R>>,
-   // work waiting to be done (no ready threads)
-   work_queue: VecDeque<T>,
+   ready_threads: usize,
    handler_fun: F,
    state: TPState
 }
 
-fn runner_task<T, R, F>(mut rx: MessageQueueReader<ThreadQuery<T>>, tx: MessageQueueSender<ThreadAnswer<R>>, worker_fun: F)
+fn runner_task<T, R, F>(mut rx: MessageQueueReader<ThreadQuery<T>>, mut tx: MessageQueueSender<ThreadAnswer<R>>, worker_fun: F)
     where F: Fn(T) -> Result<R, TPError> {
-        while let Ok(msg) = rx.blocking_read() {
+        while let Some(msg) = rx.blocking_read() {
             match msg {
-                ThreadQuery::RunTask(task) => {//TODO
+                ThreadQuery::RunTask(task) => {
                     match worker_fun(task) {
                         Ok(res) => tx.send(ThreadAnswer::TaskResult(res)).unwrap(),
                         Err(e) => tx.send(ThreadAnswer::Error(e)).unwrap()
@@ -156,28 +163,25 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
             cmd_rx: rx,
             cmd_tx: tx,
             threads,
-            work_queue: VecDeque::new(),
+            available_threads: number_workers,
             handler_fun: f,
             state: TPState::Running
         })
     }
 
     fn get_ready_thread(&mut self) -> Option<&mut TPThread<T, R>> {
-        for i in 0..self.threads.len() {
-            if self.threads[i].state == TPThreadState::Ready {
-                return Some(&mut self.threads[i]);
+        if self.available_threads != 0 {
+            for i in 0..self.threads.len() {
+                if self.threads[i].state == TPThreadState::Ready {
+                    return Some(&mut self.threads[i]);
+                }
             }
         }
         None
     }
 
     fn is_ready_thread(&self) -> bool {
-        for i in 0..self.threads.len() {
-            if self.threads[i].state == TPThreadState::Ready {
-                return true;
-            }
-        }
-        false
+        self.available_threads != 0
     }
 
     fn is_stopped(&self) -> bool {
@@ -190,21 +194,11 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
 
     }
 
-    // At least a thread must be ready to call this function.
-    fn run_work_from_queue(&mut self) -> Result<(), TPError> {
-        // The excessive check is saddening but is forced upon us by the borrow checker
-        while self.is_ready_thread() && !self.work_queue.is_empty() {
-            let val = self.work_queue.pop_back()?;
-            self.get_ready_thread()?.run(val)?;
-        }
-        Ok(())
-    }
-
     fn received_cmd(&mut self) -> Result<(), TPError> {
         while self.cmd_rx.is_ready() {
             let msg = match self.cmd_rx.read() {
-                Ok(x) => x,
-                Err(_) => {
+                Some(x) => x,
+                None => {
                     self.cmd_tx.send(CmdAnswer::Failed)?;
                     return Err(TPError::ReadFailed);
                 }
@@ -236,11 +230,12 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
         Ok(())
     }
 
-    fn receive_from_thread(&mut self, th: &mut TPThread<T, R>) -> Result<(), TPError> {
+    fn receive_from_thread(&mut self, thread_idx: usize) -> Result<(), TPError> {
+        let mut th = &mut self.threads[thread_idx];
         while th.rx.is_ready() {
             let msg = match th.rx.read() {
-                Ok(x) => x,
-                Err(_) => {
+                Some(x) => x,
+                None => {
                     self.cmd_tx.send(CmdAnswer::Failed)?;
                     return Err(TPError::ReadFailed);
                 }
@@ -282,53 +277,19 @@ impl<T: Send + 'static, R: Send + 'static, F: Fn(T) -> Result<R, TPError> + 'sta
     }
 
     fn tp_loop(mut self) -> Result<(), TPError> {
-        let epfd = epoll::epoll_create1(epoll::EpollCreateFlags::EPOLL_CLOEXEC)?;
-        // TODO: handle peer disconnection (and threads panicking)
-        let mut ev = epoll::EpollEvent::new(epoll::EpollFlags::EPOLLIN, 0);
-        epoll::epoll_ctl(epfd, epoll::EpollOp::EpollCtlAdd, self.cmd_rx.get_fd(), Some(&mut ev));
-        for i in 0..self.threads.len() {
-            // Behold ! Dark magic is happening here ! (Yes, it's only dark because it's not arcane enought
-            // to be called black magic). We store a pointer to the queue in the data, which allow us to call
-            // thread.rx.read() directly on the data returned by epoll. (I wonder what will hapen with 128
-            // bit architectures when thoses will exist).
-            // Besides, the whole point of this is that adding/deleting threads shouldn't impact epoll in
-            // any way, thus referencing threads by their index in self.threads is not workable.
-            let mut ev = epoll::EpollEvent::new(epoll::EpollFlags::EPOLLIN, &mut self.threads[i] as *mut TPThread<T, R> as u64);
-            epoll::epoll_ctl(epfd, epoll::EpollOp::EpollCtlAdd, self.threads[i].rx.get_fd(), Some(&mut ev))?;
-        }
-
-        // A listener per worker thread + the command queue
-        let max_events = self.threads.len()+1;
-        let mut events_vec = Vec::with_capacity(max_events);
-        for _ in 0..max_events {
-            events_vec.push(epoll::EpollEvent::empty());
-        }
         while self.state != TPState::Stopped {
-            let res = match epoll::epoll_wait(epfd, &mut events_vec, -1) {
-                Ok(x) => x,
-                Err(_) => {
-                    self.cmd_tx.send(CmdAnswer::Failed)?;
-                    return Err(TPError::EpollWaitFailed);
-                }
-            };
-            // Nothing interesting here, go on (probably some spurious interrupt)
-            if res == 0 { continue; }
-
-            for i in 0..res {
-                let reader_ptr = events_vec[i].data();
-                if reader_ptr == 0 {
-                    // Command query (aka. command received on self.cmd_rx)
-                    self.received_cmd()?;
-                } else {
-                    // Because who doesn't like transmut'ing stuff ?
-                    let mut reader: &mut TPThread<T, R> = unsafe { mem::transmute(reader_ptr) };
-                    self.receive_from_thread(&mut reader)?;
+            if self.cmd_rx.is_ready() {
+                self.received_cmd()?;
+            }
+            for i in 0..self.threads.len() {
+                if let Some(msg) = self.threads[i].rx.read() {
+                    self.receive_from_thread(i)?;
                 }
             }
             self.run_work_from_queue()?;
+            thread::yield_now();
         }
         self.cmd_tx.send(CmdAnswer::Stopped)?;
-        unistd::close(epfd)?;
         Ok(())
     }
 
@@ -346,8 +307,8 @@ pub struct TPHandler<T, R> {
 
 impl<T: Send + 'static, R: Send + 'static> TPHandler<T, R> {
     pub fn new<F: Fn(T) -> Result<R, TPError> + 'static + Clone + Send>(number_workers: usize, f: F) -> Result<TPHandler<T, R>, TPError> {
-        let (cmd_tx, mut _cmd_rx) = MessageQueue(2048)?;
-        let (_cmd_tx, mut cmd_rx) = MessageQueue(2048)?;
+        let (cmd_tx, mut _cmd_rx) = MessageQueue(1e6 as usize)?;
+        let (_cmd_tx, mut cmd_rx) = MessageQueue(1e6 as usize)?;
         let tp = TP::new(_cmd_rx, _cmd_tx, number_workers, f)?;
         let handle = tp.run();
         Ok(TPHandler {
@@ -357,17 +318,22 @@ impl<T: Send + 'static, R: Send + 'static> TPHandler<T, R> {
         })
     }
 
-    pub fn send(&self, task: T) -> Result<(), TPError> {
+    pub fn send(&mut self, task: T) -> Result<(), TPError> {
         self.tx.send(CmdQuery::AddTask(task))?;
         Ok(())
     }
 
-    pub fn stop(&self, thread: Option<usize>) -> Result<(), TPError> {
+    pub fn stop(&mut self, thread: Option<usize>) -> Result<(), TPError> {
         if let Some(t) = thread {
             self.tx.send(CmdQuery::StopThread(t))?;
         } else {
             self.tx.send(CmdQuery::Stop)?;
         }
         Ok(())
+    }
+
+    pub fn blocking_read(&mut self) -> Result<CmdAnswer<R>, TPError> {
+        let val = self.rx.blocking_read()?;
+        Ok(val)
     }
 }

@@ -5,24 +5,25 @@ extern crate libc;
 mod lib;
 #[cfg(test)] mod tests;
 
+use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
+
 use lib::messagequeue::*;
 use lib::threadpool::*;
 
-fn handler(x: usize) -> Result<usize, TPError> {
-    Ok(x+1)
+fn handler(socket: TcpStream) -> Result<(), TPError> {
+    println!("{}", socket.peer_addr().unwrap());
+    socket.shutdown(Shutdown::Both).unwrap();
+    Ok(())
 }
 
 fn main() -> Result<(), TPError> {
-    let tp = TPHandler::new(2, handler)?;
-    for i in 0..25 {
-        tp.send(i)?;
-    }
-    tp.stop(None)?;
+    let mut tp = TPHandler::new(2, handler)?;
+    let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
     loop {
-        let msg = cmd_rx.blocking_read().unwrap();
-        println!("{:?}", msg);
+        match listener.accept() {
+            Ok((socket, _)) => tp.send(socket).unwrap(),
+            Err(e) => println!("couldn't get client: {:?}", e),
+        }
     }
-    println!("{:?}", joinhandle.join());
-    //tp.add_task(15);
     Ok(())
 }

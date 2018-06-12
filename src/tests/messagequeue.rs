@@ -3,7 +3,6 @@ use lib::messagequeue::*;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-#[repr(packed)]
 #[derive(Debug, PartialEq)]
 struct TestStruct {
     a: usize,
@@ -29,7 +28,7 @@ fn create_message_queue() {
 
 #[test]
 fn create_reader() {
-    let t = MessageQueueSender::<usize>::new(256).unwrap();
+    let mut t = MessageQueueSender::<usize>::new(256).unwrap();
     let reader = t.new_reader();
     assert_eq!(reader.unread(), 0);
     assert_eq!(reader.is_ready(), false);
@@ -37,7 +36,7 @@ fn create_reader() {
 
 #[test]
 fn send_without_reader() {
-    let t = MessageQueueSender::<usize>::new(256).unwrap();
+    let mut t = MessageQueueSender::<usize>::new(256).unwrap();
     for i in 0..255 {
         let res = t.send(i);
         assert!(res.is_ok());
@@ -49,7 +48,7 @@ fn send_without_reader() {
 
 #[test]
 fn send_with_reader() {
-    let t = MessageQueueSender::<usize>::new(256).unwrap();
+    let mut t = MessageQueueSender::<usize>::new(256).unwrap();
     for i in 0..127 {
         let res = t.send(i);
         assert!(res.is_ok());
@@ -59,7 +58,7 @@ fn send_with_reader() {
     assert!(reader.is_ready());
     for c in 0..127  {
         assert_eq!(reader.is_ready(), true);
-        assert_eq!(reader.read(), Ok(c));
+        assert_eq!(reader.read(), Some(c));
     }
     assert_eq!(reader.unread(), 0);
     assert!(!reader.is_ready());
@@ -75,7 +74,7 @@ fn send_with_reader() {
 
     let mut c = 0;
     while reader.is_ready() {
-        assert_eq!(reader.blocking_read(), Ok(c));
+        assert_eq!(reader.blocking_read(), Some(c));
         c += 1;
     }
     assert_eq!(c, 255);
@@ -83,7 +82,7 @@ fn send_with_reader() {
 
 #[test]
 fn send_struct() {
-    let t = MessageQueueSender::<TestStruct>::new(256).unwrap();
+    let mut t = MessageQueueSender::<TestStruct>::new(256).unwrap();
     for i in 0..127 {
         t.send(TestStruct {
             a: i,
@@ -93,7 +92,7 @@ fn send_struct() {
     }
     let mut r = t.new_reader();
     for i in 0..127 {
-        assert_eq!(r.read(), Ok(TestStruct {
+        assert_eq!(r.read(), Some(TestStruct {
             a: i,
             b: "42".into(),
             c: [i, i+1]
@@ -103,7 +102,7 @@ fn send_struct() {
 
 #[test]
 fn send_across_thread() {
-    let t = MessageQueueSender::<usize>::new(256).unwrap();
+    let mut t = MessageQueueSender::<usize>::new(256).unwrap();
     for i in 0..127 {
         let res = t.send(i);
         assert!(res.is_ok());
@@ -115,7 +114,7 @@ fn send_across_thread() {
         assert!(reader.is_ready());
         for c in 0..127  {
             assert_eq!(reader.is_ready(), true);
-            assert_eq!(reader.read(), Ok(c));
+            assert_eq!(reader.read(), Some(c));
         }
     }).join().is_ok());
 
@@ -142,7 +141,7 @@ fn send_across_thread() {
     assert!(thread::spawn(move || {
         for i in 0..255 {
             assert!(reader.is_ready());
-            assert_eq!(reader.read(), Ok(i));
+            assert_eq!(reader.read(), Some(i));
         }
         assert!(!reader.is_ready());
     }).join().is_ok());
@@ -150,7 +149,7 @@ fn send_across_thread() {
 
 #[test]
 fn send_concurrently() {
-    let t = MessageQueueSender::<usize>::new(8192).unwrap();
+    let mut t = MessageQueueSender::<usize>::new(8192).unwrap();
     for i in 0..4096 {
         let res = t.send(i);
         assert!(res.is_ok());
@@ -162,18 +161,20 @@ fn send_concurrently() {
         assert!(reader.is_ready());
         for c in 0..4096  {
             assert_eq!(reader.is_ready(), true);
-            assert_eq!(reader.read(), Ok(c));
+            assert_eq!(reader.read(), Some(c));
         }
     }).join().is_ok());
 
+    let mut t = MessageQueueSender::<usize>::new(8192).unwrap();
     let mut reader = t.new_reader();
+    let reader2 = t.new_reader();
     let sender_thread = thread::spawn(move || {
         for i in 0..8192 {
             let res = t.send(i);
             assert!(res.is_ok());
         }
         // Yeah, horrible spinlocks ;)
-        while t.internal.unread() != 0 { }
+        while !reader2.is_ready() { }
         t.send(8888).unwrap();
     });
 
@@ -181,12 +182,12 @@ fn send_concurrently() {
         let mut c = 0;
         while c < 8192 {
             if reader.is_ready() {
-                assert_eq!(reader.read(), Ok(c));
+                assert_eq!(reader.read(), Some(c));
                 c += 1;
             }
         }
         while !reader.is_ready() { }
-        assert_eq!(reader.read(), Ok(8888));
+        assert_eq!(reader.read(), Some(8888));
     });
 
    assert!(sender_thread.join().is_ok());
@@ -195,7 +196,7 @@ fn send_concurrently() {
 
 #[test]
 fn send_concurrently_blocking_read() {
-    let t = MessageQueueSender::<usize>::new(8192).unwrap();
+    let mut t = MessageQueueSender::<usize>::new(8192).unwrap();
     for i in 0..4096 {
         let res = t.send(i);
         assert!(res.is_ok());
@@ -204,16 +205,16 @@ fn send_concurrently_blocking_read() {
     let mut reader = t.new_reader();
     assert!(thread::spawn(move || {
         for c in 0..4096  {
-            assert_eq!(reader.blocking_read(), Ok(c));
+            assert_eq!(reader.blocking_read(), Some(c));
         }
     }).join().is_ok());
 
     let mut reader = t.new_reader();
     let blocking_thread = thread::spawn(move || {
         let now = SystemTime::now();
-        assert_eq!(reader.blocking_read(), Ok(42));
-        // add 5 ms of margin to account for relativity
-        assert!(now.elapsed().unwrap() > Duration::from_millis(45));
+        assert_eq!(reader.blocking_read(), Some(42));
+        // add 15 ms of margin to account for relativity ;)
+        assert!(now.elapsed().unwrap() > Duration::from_millis(35));
     });
 
     thread::sleep(Duration::from_millis(50));
@@ -244,7 +245,7 @@ fn create_reader_2048(b: &mut test::Bencher) {
 
 #[bench]
 fn send_message_2048(b: &mut test::Bencher) {
-    let s = MessageQueueSender::<usize>::new(2048).unwrap();
+    let mut s = MessageQueueSender::<usize>::new(2048).unwrap();
 	let mut r = s.new_reader();
 	b.iter(|| {
         for i in 0..1000 {
