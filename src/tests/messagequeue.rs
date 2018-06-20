@@ -213,7 +213,7 @@ fn send_1000_messages(b: &mut test::Bencher) {
 
 #[bench]
 fn send_1M_message_parallel(b: &mut test::Bencher) {
-    let (mut tx, mut rx) = MessageQueue(2000000).unwrap();
+    let (mut tx, rx) = MessageQueue(2000000).unwrap();
     b.iter(|| {
         let mut rx2 = rx.clone();
         let th = thread::spawn(move || for _ in 0..1000000 {
