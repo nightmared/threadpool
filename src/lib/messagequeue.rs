@@ -116,7 +116,7 @@ impl<T: Sized> MessageQueueReader<T> {
     fn get_current_val(&mut self) -> T {
         let rpos = self.internal.read_ptr.load(Ordering::SeqCst)%self.internal.len;
 
-        let val = self.internal.backing_store.get(rpos).unwrap();
+        let val = self.internal.backing_store.get(rpos);
 
         self.internal.available.fetch_sub(1, Ordering::SeqCst);
         self.internal.read_ptr.fetch_add(1, Ordering::SeqCst);

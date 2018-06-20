@@ -1,4 +1,4 @@
-extern crate test;
+use test;
 use lib::messagequeue::*;
 use std::thread;
 use std::time::{Duration, SystemTime};

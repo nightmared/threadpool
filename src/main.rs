@@ -1,6 +1,7 @@
 #![feature(test, extern_prelude, crate_visibility_modifier)]
 extern crate nix;
 extern crate libc;
+extern crate test;
 
 mod lib;
 #[cfg(test)] mod tests;
