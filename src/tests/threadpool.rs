@@ -7,11 +7,10 @@ fn test_func(x: usize) -> Result<usize, io::Error> {
     Ok(x+1)
 }
 
-fn slow_func(x: usize) -> Result<usize, io::Error> {
+fn slow_func(_: usize) -> Result<usize, io::Error> {
     loop {
         thread::sleep(Duration::from_millis(25));
     }
-    Ok(x+1)
 }
 
 #[test]
@@ -47,7 +46,7 @@ fn exchange_10k_messages(b: &mut test::Bencher) {
         for i in 0..10000 {
             assert!(tp.run(i, 2*i).is_ok());
         }
-        for i in 0..10000 {
+        for _ in 0..10000 {
             assert!(tp.blocking_read().is_some());
         }
     });

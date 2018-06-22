@@ -1,5 +1,5 @@
 use lib::messagequeue::*;
-use std::{io, mem, thread};
+use std::{io, thread};
 use std::os::unix::thread::JoinHandleExt;
 use libc::{pthread_kill, pthread_exit};
 use nix::sys::signal::*;
@@ -18,8 +18,7 @@ struct ThreadInternal<T, R, F> {
     handler: F
 }
 
-#[no_mangle]
-pub extern "C" fn kill_handler(sig: libc::c_int) {
+pub extern "C" fn kill_handler(_sig: libc::c_int) {
     unsafe { pthread_exit(0 as *mut libc::c_void); }
 }
 
@@ -27,12 +26,15 @@ impl<T, R, F: Fn(T) -> Result<R, io::Error>> ThreadInternal<T, R, F> {
     pub fn run(mut self) {
         unsafe {
             let act = SigAction::new(SigHandler::Handler(kill_handler), SaFlags::empty(), SigSet::empty());
-            sigaction(Signal::SIGUSR1, &act);
+            sigaction(Signal::SIGUSR1, &act).unwrap();
         }
         loop {
             let msg = self.rx.blocking_read().unwrap();
             match msg.op {
-                ThreadOperation::Stop => return,
+                ThreadOperation::Stop => {
+					self.tx.send(ThreadAnswer::stopped()).unwrap();
+					return;
+				},
                 ThreadOperation::RunTask => self.tx.send(ThreadAnswer::res(msg.id, (self.handler)(msg.val.unwrap()))).unwrap()
             }
         }
@@ -108,8 +110,8 @@ crate struct Thread<T, R> {
 impl<T: Send + 'static, R: Send + 'static> Thread<T, R> {
     pub fn new<F>(message_queue_size: usize, f: F) -> Result<Thread<T, R>, MessageQueueError> 
         where F: Fn(T) -> Result<R, io::Error> + 'static + Send {
-        let (mut tx1, mut rx1) = MessageQueue(message_queue_size)?;
-        let (mut tx2, mut rx2) = MessageQueue(message_queue_size)?;
+        let (tx1, rx1) = message_queue(message_queue_size)?;
+        let (tx2, rx2) = message_queue(message_queue_size)?;
         let th = thread::spawn(move || ThreadInternal {
             rx: rx1,
             tx: tx2,

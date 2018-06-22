@@ -1,4 +1,4 @@
-#![feature(test, extern_prelude, crate_visibility_modifier)]
+#![feature(test, extern_prelude, crate_visibility_modifier, try_trait)]
 extern crate nix;
 extern crate libc;
 extern crate test;

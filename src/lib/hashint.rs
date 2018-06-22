@@ -10,7 +10,7 @@ pub enum HashError {
 }
 
 impl From<HashError> for io::Error {
-    fn from(e: HashError) -> Self {
+    fn from(_: HashError) -> Self {
         io::Error::new(io::ErrorKind::Other, "HashIntError")
     }
 }
@@ -117,7 +117,7 @@ impl<T: Clone> HashInt<T> {
         };
         self.backing_store.set(pos, None);
         // move values that were "pushed forward"
-        while true {
+        loop {
             let next_pos = (Wrapping(pos)+Wrapping(1)).0%self.backing_store.len;
             if let Some(x) = self.backing_store.get(next_pos) {
                 let expected_pos = self.hash_func(x.id);

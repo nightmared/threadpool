@@ -41,7 +41,7 @@ fn create_reader() {
 
 #[test]
 fn send_without_reader() {
-    let (mut tx, _) = MessageQueue(256).unwrap();
+    let (mut tx, _) = message_queue(256).unwrap();
     send_msg(&mut tx, 256);
     // One too much
     assert_eq!(tx.send(256).err(), Some(MessageQueueError::MessageQueueFull));
@@ -49,7 +49,7 @@ fn send_without_reader() {
 
 #[test]
 fn send_with_reader() {
-    let (mut tx, mut rx) = MessageQueue(256).unwrap();
+    let (mut tx, mut rx) = message_queue(256).unwrap();
     send_msg(&mut tx, 127);
     assert_eq!(rx.unread(), 127);
     assert!(rx.is_ready());
@@ -80,7 +80,7 @@ fn send_struct() {
             a: i,
             b: "42".into(),
             c: [i, i+1]
-        });
+        }).unwrap();
     }
     let mut r = t.new_reader();
     for i in 0..127 {
@@ -94,7 +94,7 @@ fn send_struct() {
 
 #[test]
 fn send_across_thread() {
-    let (mut tx, mut rx) = MessageQueue(256).unwrap();
+    let (mut tx, mut rx) = message_queue(256).unwrap();
     for i in 0..127 {
         assert!(tx.send(i).is_ok());
     }
@@ -113,7 +113,7 @@ fn send_across_thread() {
 
 #[test]
 fn send_concurrently() {
-    let (mut tx, mut rx) = MessageQueue(8192).unwrap();
+    let (mut tx, mut rx) = message_queue(8192).unwrap();
     for i in 0..4096 {
         assert!(tx.send(i).is_ok());
     }
@@ -127,7 +127,7 @@ fn send_concurrently() {
         }
     }).join().is_ok());
 
-    let (mut tx, mut rx) = MessageQueue(8192).unwrap();
+    let (mut tx, mut rx) = message_queue(8192).unwrap();
     let rx2 = rx.clone();
     let sender_thread = thread::spawn(move || {
         for i in 0..8192 {
@@ -156,7 +156,7 @@ fn send_concurrently() {
 
 #[test]
 fn send_concurrently_blocking_read() {
-    let (mut tx, mut rx) = MessageQueue(8192).unwrap();
+    let (mut tx, mut rx) = message_queue(8192).unwrap();
     let mut rx2 = rx.clone();
     for i in 0..4096 {
         assert!(tx.send(i).is_ok());
@@ -202,7 +202,7 @@ fn create_reader_2048(b: &mut test::Bencher) {
 
 #[bench]
 fn send_1000_messages(b: &mut test::Bencher) {
-    let (mut tx, mut rx) = MessageQueue(2048).unwrap();
+    let (mut tx, mut rx) = message_queue(2048).unwrap();
 	b.iter(|| {
         for i in 0..1000 {
             tx.send(i).unwrap();
@@ -212,8 +212,8 @@ fn send_1000_messages(b: &mut test::Bencher) {
 }
 
 #[bench]
-fn send_1M_message_parallel(b: &mut test::Bencher) {
-    let (mut tx, rx) = MessageQueue(2000000).unwrap();
+fn send_1m_message_parallel(b: &mut test::Bencher) {
+    let (mut tx, rx) = message_queue(2000000).unwrap();
     b.iter(|| {
         let mut rx2 = rx.clone();
         let th = thread::spawn(move || for _ in 0..1000000 {

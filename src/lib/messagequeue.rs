@@ -51,7 +51,7 @@ impl From<nix::Error> for MessageQueueError {
 }
 
 impl From<MessageQueueError> for io::Error {
-    fn from(e: MessageQueueError) -> Self {
+    fn from(_: MessageQueueError) -> Self {
         io::Error::new(io::ErrorKind::Other, "MessageQueueError")
     }
 }
@@ -149,7 +149,7 @@ impl<T: Sized> MessageQueueReader<T> {
 /// This is very akin to a ruststd channel.
 /// However, the whole reason of this implementation is to be able to listen on its file descriptor
 /// using epoll, which was apparently not possible on channels.
-crate fn MessageQueue<T>(num_elements: usize) -> Result<(MessageQueueSender<T>, MessageQueueReader<T>), MessageQueueError> {
+crate fn message_queue<T>(num_elements: usize) -> Result<(MessageQueueSender<T>, MessageQueueReader<T>), MessageQueueError> {
     let mut sender = match MessageQueueSender::new(num_elements) {
         Ok(x) => x,
         Err(e) => return Err(e)
