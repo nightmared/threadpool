@@ -222,6 +222,6 @@ fn send_1M_message_parallel(b: &mut test::Bencher) {
         for i in 0..1000000 {
             tx.send(i).unwrap();
         }
-        th.join().unwrap();
+        assert!(th.join().is_ok());
     });
 }

@@ -1,8 +1,16 @@
 extern crate test;
-use std::io;
+use std::{io, thread};
+use std::time::Duration;
 use lib::threadpool::*;
 
 fn test_func(x: usize) -> Result<usize, io::Error> {
+    Ok(x+1)
+}
+
+fn slow_func(x: usize) -> Result<usize, io::Error> {
+    loop {
+        thread::sleep(Duration::from_millis(25));
+    }
     Ok(x+1)
 }
 
@@ -20,6 +28,16 @@ fn exchange_messages() {
     let msg = tp.blocking_read().unwrap();
     assert!(msg.id == 0);
     assert!(msg.val.unwrap().unwrap() == 43);
+}
+
+#[test]
+fn force_stop() {
+    let mut tp = PoolHandler::new(4, 1024, 1024, &slow_func).unwrap();
+    assert!(tp.run(0, 42).is_ok());
+    assert!(tp.stop_task(0).is_ok());
+    let msg = tp.blocking_read().unwrap();
+    assert!(msg.id == 0);
+    assert!(msg.state == AnswerState::ThreadKilled);
 }
 
 #[bench]

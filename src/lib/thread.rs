@@ -1,5 +1,8 @@
 use lib::messagequeue::*;
-use std::{io, thread};
+use std::{io, mem, thread};
+use std::os::unix::thread::JoinHandleExt;
+use libc::{pthread_kill, pthread_exit};
+use nix::sys::signal::*;
 
 #[derive(Debug, PartialEq)]
 crate enum ThreadState {
@@ -15,8 +18,17 @@ struct ThreadInternal<T, R, F> {
     handler: F
 }
 
+#[no_mangle]
+pub extern "C" fn kill_handler(sig: libc::c_int) {
+    unsafe { pthread_exit(0 as *mut libc::c_void); }
+}
+
 impl<T, R, F: Fn(T) -> Result<R, io::Error>> ThreadInternal<T, R, F> {
     pub fn run(mut self) {
+        unsafe {
+            let act = SigAction::new(SigHandler::Handler(kill_handler), SaFlags::empty(), SigSet::empty());
+            sigaction(Signal::SIGUSR1, &act);
+        }
         loop {
             let msg = self.rx.blocking_read().unwrap();
             match msg.op {
@@ -89,7 +101,8 @@ impl<R> ThreadAnswer<R> {
 crate struct Thread<T, R> {
     crate state: ThreadState,
     crate rx: MessageQueueReader<ThreadAnswer<R>>,
-    crate tx: MessageQueueSender<ThreadQuery<T>>
+    crate tx: MessageQueueSender<ThreadQuery<T>>,
+    crate handle: thread::JoinHandle<()>
 }
 
 impl<T: Send + 'static, R: Send + 'static> Thread<T, R> {
@@ -97,7 +110,7 @@ impl<T: Send + 'static, R: Send + 'static> Thread<T, R> {
         where F: Fn(T) -> Result<R, io::Error> + 'static + Send {
         let (mut tx1, mut rx1) = MessageQueue(message_queue_size)?;
         let (mut tx2, mut rx2) = MessageQueue(message_queue_size)?;
-        thread::spawn(move || ThreadInternal {
+        let th = thread::spawn(move || ThreadInternal {
             rx: rx1,
             tx: tx2,
             handler: f
@@ -105,7 +118,8 @@ impl<T: Send + 'static, R: Send + 'static> Thread<T, R> {
         Ok(Thread {
             state: ThreadState::Ready,
             rx: rx2,
-            tx: tx1
+            tx: tx1,
+            handle: th
         })
     }
     pub fn run(&mut self, id: usize, task: T) -> Result<(), MessageQueueError> {
@@ -116,6 +130,15 @@ impl<T: Send + 'static, R: Send + 'static> Thread<T, R> {
     pub fn stop(&mut self) -> Result<(), MessageQueueError> {
         self.tx.send(ThreadQuery::stop())?;
         self.state = ThreadState::Stopping;
+        Ok(())
+    }
+    pub fn force_stop(&mut self) -> Result<(), io::Error> {
+        let thread_id = self.handle.as_pthread_t();
+        unsafe {
+            // SIGUSR1 = 10
+            pthread_kill(thread_id, 10);
+        }
+        self.state = ThreadState::Stopped;
         Ok(())
     }
     pub fn is_ready(&self) -> bool {

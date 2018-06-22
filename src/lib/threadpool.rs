@@ -48,7 +48,8 @@ impl<T> Query<T> {
 #[derive(Debug, PartialEq)]
 pub enum AnswerState {
     TaskResult,
-    Stopped
+    Stopped,
+    ThreadKilled
 }
 
 #[derive(Debug)]
@@ -73,6 +74,25 @@ impl<R> Answer<R> {
             val: None
         }
     }
+    fn thread_killed(id: usize) -> Self {
+        Answer {
+            state: AnswerState::ThreadKilled,
+            id,
+            val: None
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum PoolError {
+    MessageQueueError,
+    ThreadPoisoned
+}
+
+impl From<MessageQueueError> for PoolError {
+    fn from(e: MessageQueueError) -> Self {
+        PoolError::MessageQueueError
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -86,12 +106,13 @@ struct Pool<T: 'static, R: 'static, F> {
     threads: Vec<Thread<T, R>>,
     work_queue: VecDeque<Query<T>>,
     tasks: HashInt<usize>,
+    msg_queue_size: usize,
     handler_fun: F,
     rx: MessageQueueReader<Query<T>>,
     tx: MessageQueueSender<Answer<R>>
 }
 
-impl<T: Send, R: Send, F: Fn(T) -> Result<R, io::Error> + Send> Pool<T, R, F> {
+impl<T: Send, R: Send, F: Fn(T) -> Result<R, io::Error> + Send + 'static + Clone> Pool<T, R, F> {
     fn handle_cmd(&mut self, msg: Query<T>) {
         if self.state != PoolState::Running {
             return;
@@ -111,7 +132,22 @@ impl<T: Send, R: Send, F: Fn(T) -> Result<R, io::Error> + Send> Pool<T, R, F> {
                 }
                 self.work_queue.push_front(msg);
             },
-            Command::StopTask => unimplemented!(),
+            Command::StopTask => {
+                // is task running ?
+                if let Some(thread_id) = self.tasks.get(msg.id) {
+                    self.threads[thread_id].force_stop().unwrap();
+                    self.tasks.remove(msg.id);
+                    self.threads[thread_id] = Thread::new(self.msg_queue_size, self.handler_fun.clone()).unwrap();
+                    self.tx.send(Answer::thread_killed(msg.id)).unwrap();
+                    return;
+                }
+                // Is the task present in the work queue ?
+                // Yes, scanning the whole array is really inefficient...
+                let task: Vec<usize> = self.work_queue.iter().enumerate().filter(|(_, val)| val.id == msg.id).map(|(i, _)| i).take(1).collect();
+                if task.len() > 0 {
+                    self.work_queue.remove(task[0]);
+                }
+            },
             Command::Stop => {
                 self.work_queue.clear();
                 self.state == PoolState::Stopping;
@@ -126,6 +162,7 @@ impl<T: Send, R: Send, F: Fn(T) -> Result<R, io::Error> + Send> Pool<T, R, F> {
                 match x.res {
                     ThreadResult::Stopped => {
                         thread.state = ThreadState::Stopped;
+                        return;
                     },
                     ThreadResult::TaskResult => {
                         self.tasks.remove(x.id);
@@ -162,12 +199,10 @@ impl<T: Send, R: Send, F: Fn(T) -> Result<R, io::Error> + Send> Pool<T, R, F> {
                     self.handle_thread_result(i);
                 }
             }
-            if self.state == PoolState::Stopping {
-                let stopped_threads = self.threads.iter().fold(0, |acc, x| if x.is_stopped() { acc+1 } else { acc });
-                if stopped_threads == self.threads.len() {
-                    self.tx.send(Answer::stopped());
-                    return;
-                }
+            let stopped_threads = self.threads.iter().fold(0, |acc, x| if x.is_stopped() { acc+1 } else { acc });
+            if stopped_threads == self.threads.len() {
+                self.tx.send(Answer::stopped());
+                return;
             }
             thread::yield_now();
         }
@@ -195,6 +230,7 @@ impl<T: Send, R: Send, F: Fn(T) -> Result<R, io::Error> + 'static + Clone + Send
             work_queue: VecDeque::new(),
             tasks,
             handler_fun: f,
+            msg_queue_size: workers_queue_len,
             rx: rx1,
             tx: tx2
         }.run());
@@ -205,11 +241,23 @@ impl<T: Send, R: Send, F: Fn(T) -> Result<R, io::Error> + 'static + Clone + Send
             phantom: PhantomData
         })
     }
-    pub fn run(&mut self, id: usize, task: T) -> Result<(), MessageQueueError> {
-        self.tx.send(Query::run_task(id, task))
+    pub fn run(&mut self, id: usize, task: T) -> Result<(), PoolError> {
+        self.tx.send(Query::run_task(id, task))?;
+        Ok(())
+    }
+    pub fn stop(&mut self) -> Result<(), PoolError> {
+        self.tx.send(Query::stop())?;
+        Ok(())
+    }
+    pub fn stop_task(&mut self, id: usize) -> Result<(), PoolError> {
+        self.tx.send(Query::stop_task(id))?;
+        Ok(())
     }
     pub fn blocking_read(&mut self) -> Option<Answer<R>> {
         self.rx.blocking_read()
+    }
+    pub fn read(&mut self) -> Option<Answer<R>> {
+        self.rx.read()
     }
 }
 

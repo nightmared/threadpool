@@ -20,20 +20,20 @@ unsafe impl<T> Send for MessageQueueInternal<T> { }
 unsafe impl<T> Sync for MessageQueueInternal<T> { }
 
 #[derive(Debug)]
-pub struct MessageQueueSender<T> {
+crate struct MessageQueueSender<T> {
     crate internal: Arc<MessageQueueInternal<T>>,
     write_pointer: usize,
     _t: PhantomData<T>
 }
 
 #[derive(Debug, Clone)]
-pub struct MessageQueueReader<T> {
+crate struct MessageQueueReader<T> {
     crate internal: Arc<MessageQueueInternal<T>>,
     _t: PhantomData<T>
 }
 
 #[derive(Debug, PartialEq)]
-pub enum MessageQueueError {
+crate enum MessageQueueError {
     UnvalidSize,
     FileDescriptorCreationFailed,
     MemoryAllocationFailed,
@@ -86,7 +86,7 @@ impl<T: Sized> MessageQueueSender<T> {
     }
 
     /// Send a message to the queue
-    pub fn send(&mut self, val: T) -> Result<(), MessageQueueError> {
+    crate fn send(&mut self, val: T) -> Result<(), MessageQueueError> {
         if self.internal.available.load(Ordering::SeqCst) == self.internal.len {
             return Err(MessageQueueError::MessageQueueFull);
         }
@@ -109,11 +109,11 @@ impl<T: Sized> MessageQueueSender<T> {
 
 impl<T: Sized> MessageQueueReader<T> {
     /// Return number of entries available to read
-    pub fn unread(&self) -> usize {
+    crate fn unread(&self) -> usize {
         self.internal.available.load(Ordering::SeqCst)
     }
 
-    pub fn is_ready(&self) -> bool {
+    crate fn is_ready(&self) -> bool {
         self.unread() > 0
     }
 
@@ -128,7 +128,7 @@ impl<T: Sized> MessageQueueReader<T> {
         val
     }
 
-    pub fn read(&mut self) -> Option<T> {
+    crate fn read(&mut self) -> Option<T> {
         if self.unread() == 0 {
             None
         } else {
@@ -136,7 +136,7 @@ impl<T: Sized> MessageQueueReader<T> {
         }
     }
 
-    pub fn blocking_read(&mut self) -> Option<T> {    
+    crate fn blocking_read(&mut self) -> Option<T> {
         while self.unread() == 0 {
             thread::yield_now();
         }
@@ -149,7 +149,7 @@ impl<T: Sized> MessageQueueReader<T> {
 /// This is very akin to a ruststd channel.
 /// However, the whole reason of this implementation is to be able to listen on its file descriptor
 /// using epoll, which was apparently not possible on channels.
-pub fn MessageQueue<T>(num_elements: usize) -> Result<(MessageQueueSender<T>, MessageQueueReader<T>), MessageQueueError> {
+crate fn MessageQueue<T>(num_elements: usize) -> Result<(MessageQueueSender<T>, MessageQueueReader<T>), MessageQueueError> {
     let mut sender = match MessageQueueSender::new(num_elements) {
         Ok(x) => x,
         Err(e) => return Err(e)
