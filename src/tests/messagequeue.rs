@@ -17,7 +17,7 @@ fn send_msg(tx: &mut MessageQueueSender<usize>, num: usize) {
 }
 
 #[test]
-fn create_message_queue() {
+fn create() {
     assert_eq!(MessageQueueSender::<usize>::new(0).err(), Some(MessageQueueError::UnvalidSize));
     assert_eq!(MessageQueueSender::<usize>::new(1).err(), Some(MessageQueueError::UnvalidSize));
     // Attempt to create a queue to contain 10^12 messages
@@ -190,8 +190,8 @@ fn create_message_queue_struct_2048(b: &mut test::Bencher) {
 }
 
 #[bench]
-fn create_message_queue_struct_10m(b: &mut test::Bencher) {
-    b.iter(|| MessageQueueSender::<TestStruct>::new(10000000).unwrap());
+fn create_message_queue_struct_1m(b: &mut test::Bencher) {
+    b.iter(|| MessageQueueSender::<TestStruct>::new(1000000).unwrap());
 }
 
 #[bench]

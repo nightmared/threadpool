@@ -9,17 +9,13 @@ crate struct BackStore<T> {
     _phantom: PhantomData<T>
 }
 
+unsafe impl<T> Send for BackStore<T> {}
+
 impl<T> BackStore<T> {
     crate fn new(len: usize) -> Result<BackStore<T>, ()> {
-        // Compute the size needed to store the object in memory
-        let mut size = 128;
-        while len > size {
-            size *= 2;
-        }
-
         let backing_store = unsafe {
             // Map into memory and let backing_store point to it
-            match mman::mmap(0 as *mut libc::c_void, size*mem::size_of::<T>(), mman::ProtFlags::PROT_READ | mman::ProtFlags::PROT_WRITE, mman::MapFlags::MAP_SHARED | mman::MapFlags::MAP_ANONYMOUS, -1, 0) {
+            match mman::mmap(0 as *mut libc::c_void, len*mem::size_of::<T>(), mman::ProtFlags::PROT_READ | mman::ProtFlags::PROT_WRITE, mman::MapFlags::MAP_SHARED | mman::MapFlags::MAP_ANONYMOUS, -1, 0) {
                 Ok(x) => x,
                 Err(_) => {
                     return Err(());
@@ -27,7 +23,7 @@ impl<T> BackStore<T> {
             }
         };
         Ok(BackStore {
-            len: size,
+            len,
             data: backing_store,
             _phantom: PhantomData
         })
@@ -36,23 +32,23 @@ impl<T> BackStore<T> {
     // Beware of being within bounds, no checks will be done
     #[inline]
     crate fn get(&self, pos: usize) -> T {
-		let ptr = (self.data as usize + pos * mem::size_of::<T>()) as *mut T;
-		unsafe { mem::transmute_copy(&*ptr) }
+        let ptr = (self.data as usize + pos * mem::size_of::<T>()) as *mut T;
+        unsafe { mem::transmute_copy(&*ptr) }
     }
 
     #[inline]
-	crate fn set(&self, pos: usize, val: T) {
-		let ptr = (self.data as usize + pos * mem::size_of::<T>()) as *mut T;
-		unsafe {
-			*ptr = val
-		}
+    crate fn set(&self, pos: usize, val: T) {
+        let ptr = (self.data as usize + pos * mem::size_of::<T>()) as *mut T;
+        unsafe {
+            *ptr = val
+        }
     }
 }
 
 impl<T> Drop for BackStore<T> {
     fn drop(&mut self) {
         unsafe {
-            let _ = mman::munmap(self.data, self.len);
+            let _ = mman::munmap(self.data, self.len*mem::size_of::<T>());
         }
     }
 }

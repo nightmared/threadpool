@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
+use std::{io, thread};
 use lib::backstore::BackStore;
 
 /// The whole point of this struct is to be able to share it inside an Arc to prevent the sender
@@ -11,7 +11,7 @@ use lib::backstore::BackStore;
 pub(crate) struct MessageQueueInternal<T> {
     pub len: usize,
     available: AtomicUsize,
-	read_ptr: AtomicUsize,
+    read_ptr: AtomicUsize,
     backing_store: BackStore<T>
 }
 
@@ -50,6 +50,11 @@ impl From<nix::Error> for MessageQueueError {
     }
 }
 
+impl From<MessageQueueError> for io::Error {
+    fn from(e: MessageQueueError) -> Self {
+        io::Error::new(io::ErrorKind::Other, "MessageQueueError")
+    }
+}
 
 /// Create a queue.
 /// This create a sender object from which you can then create readers.
@@ -69,7 +74,7 @@ impl<T: Sized> MessageQueueSender<T> {
         let internal = MessageQueueInternal {
             len: num_elements,
             available: AtomicUsize::new(0),
-			read_ptr: AtomicUsize::new(0),
+            read_ptr: AtomicUsize::new(0),
             backing_store
         };
 
