@@ -29,16 +29,6 @@ fn exchange_messages() {
     assert!(msg.val.unwrap().unwrap() == 43);
 }
 
-#[test]
-fn force_stop() {
-    let mut tp = PoolHandler::new(4, 1024, 1024, &slow_func).unwrap();
-    assert!(tp.run(0, 42).is_ok());
-    assert!(tp.stop_task(0).is_ok());
-    let msg = tp.blocking_read().unwrap();
-    assert!(msg.id == 0);
-    assert!(msg.state == AnswerState::ThreadKilled);
-}
-
 #[bench]
 fn exchange_10k_messages(b: &mut test::Bencher) {
     let mut tp = PoolHandler::new(4, 20000, 50, &test_func).unwrap();

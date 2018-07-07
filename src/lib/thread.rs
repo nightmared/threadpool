@@ -18,16 +18,8 @@ struct ThreadInternal<T, R, F> {
     handler: F
 }
 
-pub extern "C" fn kill_handler(_sig: libc::c_int) {
-    unsafe { pthread_exit(0 as *mut libc::c_void); }
-}
-
 impl<T, R, F: Fn(T) -> Result<R, io::Error>> ThreadInternal<T, R, F> {
     pub fn run(mut self) {
-        unsafe {
-            let act = SigAction::new(SigHandler::Handler(kill_handler), SaFlags::empty(), SigSet::empty());
-            sigaction(Signal::SIGUSR1, &act).unwrap();
-        }
         loop {
             let msg = self.rx.blocking_read().unwrap();
             match msg.op {
@@ -132,15 +124,6 @@ impl<T: Send + 'static, R: Send + 'static> Thread<T, R> {
     pub fn stop(&mut self) -> Result<(), MessageQueueError> {
         self.tx.send(ThreadQuery::stop())?;
         self.state = ThreadState::Stopping;
-        Ok(())
-    }
-    pub fn force_stop(&mut self) -> Result<(), io::Error> {
-        let thread_id = self.handle.as_pthread_t();
-        unsafe {
-            // SIGUSR1 = 10
-            pthread_kill(thread_id, 10);
-        }
-        self.state = ThreadState::Stopped;
         Ok(())
     }
     pub fn is_ready(&self) -> bool {

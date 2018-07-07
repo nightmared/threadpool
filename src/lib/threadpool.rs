@@ -149,7 +149,7 @@ impl<T: Send, R: Send, F: Fn(T) -> Result<R, io::Error> + Send + 'static + Clone
             Command::StopTask => {
                 // is task running ?
                 if let Some(thread_id) = self.tasks.get(msg.id) {
-                    self.threads[thread_id].force_stop().unwrap();
+                    self.threads[thread_id].stop().unwrap();
                     self.tasks.remove(msg.id)?;
                     self.threads[thread_id] = Thread::new(self.msg_queue_size, self.handler_fun.clone()).unwrap();
                     self.tx.send(Answer::thread_killed(msg.id)).unwrap();
