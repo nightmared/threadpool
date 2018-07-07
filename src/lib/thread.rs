@@ -4,6 +4,19 @@ use std::os::unix::thread::JoinHandleExt;
 use libc::{pthread_kill, pthread_exit};
 use nix::sys::signal::*;
 
+#[derive(Debug)]
+pub struct Task<T> {
+    pub id: usize,
+    pub task: T
+}
+
+impl<T> Task<T> {
+	#[inline]
+    pub fn new(id: usize, task: T) -> Self {
+        Task { id, task }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 crate enum ThreadState {
     Ready,
@@ -22,74 +35,27 @@ impl<T, R, F: Fn(T) -> Result<R, io::Error>> ThreadInternal<T, R, F> {
     pub fn run(mut self) {
         loop {
             let msg = self.rx.blocking_read().unwrap();
-            match msg.op {
-                ThreadOperation::Stop => {
-					self.tx.send(ThreadAnswer::stopped()).unwrap();
+            match msg {
+                ThreadQuery::Stop => {
+					self.tx.send(ThreadAnswer::Stopped).unwrap();
 					return;
 				},
-                ThreadOperation::RunTask => self.tx.send(ThreadAnswer::res(msg.id, (self.handler)(msg.val.unwrap()))).unwrap()
+                ThreadQuery::RunTask(Task {id, task }) => self.tx.send(ThreadAnswer::TaskResult { id, val: (self.handler)(task) }).unwrap()
             }
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
-crate enum ThreadOperation {
-    Stop,
-    RunTask
+#[derive(Debug)]
+crate enum ThreadQuery<T> {
+    RunTask(Task<T>),
+    Stop
 }
 
-crate struct ThreadQuery<T> {
-    pub val: Option<T>,
-    pub id: usize,
-    pub op: ThreadOperation
-}
-
-impl<T> ThreadQuery<T> {
-    pub fn stop() -> Self {
-        ThreadQuery {
-            val: None,
-            id: 0,
-            op: ThreadOperation::Stop
-        }
-    }
-    pub fn run(id: usize, task: T) -> Self {
-        ThreadQuery {
-            val: Some(task),
-            id,
-            op: ThreadOperation::RunTask
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-crate enum ThreadResult {
-    TaskResult,
+#[derive(Debug)]
+crate enum ThreadAnswer<R> {
+    TaskResult { id: usize, val: Result<R, io::Error> },
     Stopped
-}
-
-crate struct ThreadAnswer<R> {
-    pub res: ThreadResult,
-    pub id: usize,
-    pub val: Option<Result<R, io::Error>>
-}
-
-
-impl<R> ThreadAnswer<R> {
-    pub fn res(id: usize, task: Result<R, io::Error>) -> Self {
-        ThreadAnswer {
-            res: ThreadResult::TaskResult,
-            id,
-            val: Some(task)
-        }
-    }
-    pub fn stopped() -> Self {
-        ThreadAnswer {
-            res: ThreadResult::Stopped,
-            id: 0,
-            val: None
-        }
-    }
 }
 
 crate struct Thread<T, R> {
@@ -116,13 +82,13 @@ impl<T: Send + 'static, R: Send + 'static> Thread<T, R> {
             handle: th
         })
     }
-    pub fn run(&mut self, id: usize, task: T) -> Result<(), MessageQueueError> {
-        self.tx.send(ThreadQuery::run(id, task))?;
+    pub fn run(&mut self, t: Task<T>) -> Result<(), MessageQueueError> {
+        self.tx.send(ThreadQuery::RunTask(t))?;
         self.state = ThreadState::Running;
         Ok(())
     }
     pub fn stop(&mut self) -> Result<(), MessageQueueError> {
-        self.tx.send(ThreadQuery::stop())?;
+        self.tx.send(ThreadQuery::Stop)?;
         self.state = ThreadState::Stopping;
         Ok(())
     }

@@ -116,7 +116,7 @@ impl<T: Clone> HashInt<T> {
             None => return Err(HashError::NotFound)
         };
         self.backing_store.set(pos, None);
-        // move values that were "pushed forward"
+        // move values that were "pushed forward" upon insertion because their slot was taken
         loop {
             let next_pos = (Wrapping(pos)+Wrapping(1)).0%self.backing_store.len;
             if let Some(x) = self.backing_store.get(next_pos) {

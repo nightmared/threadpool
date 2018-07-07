@@ -25,8 +25,10 @@ fn exchange_messages() {
     let mut tp = PoolHandler::new(4, 1024, 1024, &test_func).unwrap();
     assert!(tp.run(0, 42).is_ok());
     let msg = tp.blocking_read().unwrap();
-    assert!(msg.id == 0);
-    assert!(msg.val.unwrap().unwrap() == 43);
+	match msg {
+		Answer::TaskResult{id, val} => assert!(id == 0 && val.unwrap() == 43),
+		_ => panic!("unexpected value")
+	}
 }
 
 #[bench]
